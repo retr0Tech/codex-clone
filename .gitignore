@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.next/
+out/
+build/
+
+# Secrets. The only credential in env is APP_ENCRYPTION_KEY; the GitHub PAT and
+# OpenAI key live encrypted in Postgres, never on disk in plaintext.
+.env
+.env.*
+!.env.example
+
+# Host-side agent state: bare mirrors, cold snapshots, gateway socket.
+.codexclone/
+
+*.tsbuildinfo
+.DS_Store
+coverage/
+.pnpm-store/

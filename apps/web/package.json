@@ -1,0 +1,31 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'web tests land with milestone 6'",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@codex-clone/core": "workspace:*",
+    "@codex-clone/db": "workspace:*",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "next": "15.5.23"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@tailwindcss/postcss": "^4",
+    "tailwindcss": "^4",
+    "eslint": "^9",
+    "eslint-config-next": "15.5.23",
+    "@eslint/eslintrc": "^3"
+  }
+}

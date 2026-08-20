@@ -1,0 +1,26 @@
+name: codex-clone
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    # Local-only app: bind to loopback, never 0.0.0.0.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: codex
+      POSTGRES_PASSWORD: codex
+      POSTGRES_DB: ${POSTGRES_DB:-codex_clone}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codex -d ${POSTGRES_DB:-codex_clone}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
+  # Shared package-manager cache mounted into every sandbox. This is a known
+  # cross-workspace channel -- a hostile agent could poison it for the next
+  # task. Acceptable locally; production uses a per-tenant cache namespace.
+  agent-cache:

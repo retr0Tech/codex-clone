@@ -1,0 +1,21 @@
+{
+  "name": "@codex-clone/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./schema": { "types": "./dist/schema.d.ts", "default": "./dist/schema.js" }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "generate": "drizzle-kit generate",
+    "migrate": "drizzle-kit migrate",
+    "lint": "echo 'no lint config for db yet'"
+  },
+  "dependencies": { "drizzle-orm": "^0.38.4", "postgres": "^3.4.5" },
+  "devDependencies": { "@types/node": "^22.10.5", "drizzle-kit": "^0.30.2", "typescript": "^5.7.3" }
+}
