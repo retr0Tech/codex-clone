@@ -94,7 +94,7 @@ export const mockTasks: MockTask[] = [
     createdAt: "2026-08-19T09:14:00.000Z",
     archivedAt: null,
     summary: "Redis-backed fixed window at 120 req/min/IP, with tests.",
-    additions: 92,
+    additions: 83,
     deletions: 3,
     filesChanged: 4,
   },

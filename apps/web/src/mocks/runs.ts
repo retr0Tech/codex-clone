@@ -24,7 +24,7 @@ new file mode 100644
 index 0000000..7c1f9ab
 --- /dev/null
 +++ b/src/middleware/rateLimit.ts
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,46 @@
 +import type { NextFunction, Request, Response } from "express";
 +import { redis } from "../lib/redis";
 +
@@ -75,7 +75,7 @@ diff --git a/src/server.ts b/src/server.ts
 index 3a91c02..b8d4e17 100644
 --- a/src/server.ts
 +++ b/src/server.ts
-@@ -1,12 +1,20 @@
+@@ -1,15 +1,20 @@
  import express from "express";
  import { router as publicRouter } from "./routes/public";
 +import { rateLimit } from "./middleware/rateLimit";
@@ -102,7 +102,7 @@ new file mode 100644
 index 0000000..2ad77e1
 --- /dev/null
 +++ b/src/middleware/rateLimit.test.ts
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,22 @@
 +import assert from "node:assert/strict";
 +import { test } from "node:test";
 +import { rateLimit } from "./rateLimit";
@@ -293,9 +293,9 @@ function buildSucceeded(): MockRun {
     {
       baseSha: "a41f0c9d3b6e2f7148ac55d90b2e1c8f4a7d3e12",
       files: [
-        { path: "src/middleware/rateLimit.ts", additions: 44, deletions: 0, status: "added" },
-        { path: "src/server.ts", additions: 8, deletions: 1, status: "modified" },
-        { path: "src/middleware/rateLimit.test.ts", additions: 31, deletions: 0, status: "added" },
+        { path: "src/middleware/rateLimit.ts", additions: 46, deletions: 0, status: "added" },
+        { path: "src/server.ts", additions: 6, deletions: 1, status: "modified" },
+        { path: "src/middleware/rateLimit.test.ts", additions: 22, deletions: 0, status: "added" },
       ],
       patch: RATE_LIMIT_PATCH,
       truncated: false,
@@ -638,9 +638,9 @@ function buildFollowUp(): MockRun {
     {
       baseSha: "a41f0c9d3b6e2f7148ac55d90b2e1c8f4a7d3e12",
       files: [
-        { path: "src/middleware/rateLimit.ts", additions: 51, deletions: 2, status: "modified" },
-        { path: "src/server.ts", additions: 8, deletions: 1, status: "modified" },
-        { path: "src/middleware/rateLimit.test.ts", additions: 31, deletions: 0, status: "added" },
+        { path: "src/middleware/rateLimit.ts", additions: 53, deletions: 2, status: "modified" },
+        { path: "src/server.ts", additions: 6, deletions: 1, status: "modified" },
+        { path: "src/middleware/rateLimit.test.ts", additions: 22, deletions: 0, status: "added" },
         { path: "README.md", additions: 2, deletions: 0, status: "modified" },
       ],
       patch: README_PATCH,
