@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "echo 'web tests land with milestone 6'",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "lint": "eslint"
   },
   "dependencies": {
@@ -29,6 +29,7 @@
     "tailwindcss": "^4",
     "eslint": "^9",
     "eslint-config-next": "15.5.23",
-    "@eslint/eslintrc": "^3"
+    "@eslint/eslintrc": "^3",
+    "tsx": "^4.19.2"
   }
 }
