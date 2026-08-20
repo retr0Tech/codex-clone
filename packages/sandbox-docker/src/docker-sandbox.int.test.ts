@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,8 @@ import Docker from "dockerode";
 import { DEFAULT_LIMITS, type SandboxHandle, type SandboxSpec } from "@codex-clone/core";
 import { AGENT_UID } from "./container-config.js";
 import type { DockerSandboxSpec } from "./docker-sandbox.js";
-import { DockerSandbox } from "./docker-sandbox.js";
+import { DockerSandbox, SandboxStartError } from "./docker-sandbox.js";
+import { LABEL_RUN_ID, LABEL_TASK_ID } from "./labels.js";
 import { acquireDockerTestLock, type DockerTestLock } from "./test-lock.js";
 import { removeVolume, volumeExists } from "./volumes.js";
 
@@ -75,12 +76,16 @@ describe("DockerSandbox against a live daemon", { skip: skip === false ? undefin
     await new Promise<void>((resolve) => gateway.listen(gatewaySocketPath, resolve));
   });
 
+  // Each step is independently guarded so a failure part-way through does not
+  // strand containers, volumes, a listening socket, or a directory in $HOME.
+  // A leaked socket in particular keeps the Node process alive after the last
+  // test, which is indistinguishable from a hang.
   after(async () => {
-    for (const handle of created) await sandbox.destroy(handle).catch(() => undefined);
+    for (const handle of created) await sandbox?.destroy(handle).catch(() => undefined);
     for (const volume of volumes) await removeVolume(docker, volume, { force: true }).catch(() => undefined);
-    await new Promise<void>((resolve) => gateway.close(() => resolve()));
-    await rm(hostDir, { recursive: true, force: true });
-    await lock.release();
+    if (gateway) await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    if (hostDir) await rm(hostDir, { recursive: true, force: true }).catch(() => undefined);
+    await lock?.release().catch(() => undefined);
   });
 
   function makeSandbox(): DockerSandbox {
@@ -292,6 +297,69 @@ describe("DockerSandbox against a live daemon", { skip: skip === false ? undefin
     assert.equal(info.State.Running, false, "container must be stopped");
     assert.ok(elapsed >= 1500, `must wait out the grace period before SIGKILL, waited ${elapsed}ms`);
     assert.ok(elapsed < 15_000, `must not wait indefinitely, waited ${elapsed}ms`);
+  });
+
+  /**
+   * The hang this guards against, and why it is worth a dedicated test:
+   *
+   * `container.start()` RESOLVES even when the OCI runtime fails during init
+   * (typically a bind source that is not yet visible inside the Docker Desktop
+   * VM). The daemon records the failure on the container and leaves it in
+   * `created`. Following that container's logs then blocks FOREVER, because a
+   * container that never ran never closes its log stream.
+   *
+   * So the observed failure was `pnpm -r test` hanging silently with no
+   * output, which looks like nothing is wrong -- strictly worse than a red
+   * test. The `timeout` below is the assertion: if attach() ever waits again,
+   * this test fails instead of hanging.
+   */
+  it("never follows the logs of a container that has not run", { timeout: 30_000 }, async () => {
+    // A container that exists but was never started is the exact state a
+    // failed OCI init leaves behind, and it is trivially reproducible.
+    const container = await docker.createContainer({
+      Image: IMAGE,
+      Entrypoint: [],
+      Cmd: ["sleep", "60"],
+      User: "10001:10001",
+      Labels: { [LABEL_RUN_ID]: "run-never-started", [LABEL_TASK_ID]: "task-never-started" },
+    });
+    const handle = { id: "never-started", providerRef: container.id };
+
+    try {
+      const startedAt = Date.now();
+      await assert.rejects(
+        (async () => {
+          for await (const _row of sandbox.attach(handle)) {
+            // Unreachable: attach must reject before it yields anything.
+          }
+        })(),
+        (err: unknown) => {
+          assert.ok(err instanceof SandboxStartError, `expected SandboxStartError, got ${String(err)}`);
+          // The daemon's own account of the failure has to reach the caller,
+          // or diagnosing this means running `docker inspect` by hand.
+          assert.match(err.message, /failed to start/);
+          assert.match(err.message, /status=created/);
+          return true;
+        },
+      );
+      assert.ok(Date.now() - startedAt < 10_000, "must fail immediately, not after a wait");
+    } finally {
+      await container.remove({ force: true }).catch(() => undefined);
+    }
+  });
+
+  it("refuses to create a sandbox when nothing is listening on the gateway socket", async () => {
+    // A socket path that is a plain file, i.e. present but dead. The old check
+    // only stat'd the path, so this reached Docker and failed as a mount error
+    // at start time -- far from the actual cause.
+    const deadPath = join(hostDir, "dead.sock");
+    await writeFile(deadPath, "");
+    const provider = new DockerSandbox({ socketPath: SOCKET, jobSpecDir: join(hostDir, "jobs") });
+
+    await assert.rejects(
+      provider.create({ ...spec({ gatewaySocketPath: deadPath }) } as SandboxSpec),
+      /is not ready.*not a socket/s,
+    );
   });
 
   it("lists live sandboxes for worker-boot reconciliation", async () => {

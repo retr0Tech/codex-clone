@@ -1,5 +1,6 @@
 import { chmod, mkdir, stat, unlink } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { connect } from "node:net";
 import { dirname } from "node:path";
 import type { GatewayChunk, GatewayRequest, RunBudget, TokenUsage } from "@codex-clone/core";
 import { DEFAULT_BUDGET, registerSecret, WIND_DOWN_INSTRUCTION } from "@codex-clone/core";
@@ -90,6 +91,37 @@ export class GatewayServer {
      */
     await chmod(path, 0o666);
     this.#server = server;
+
+    /**
+     * Do not return until the socket is on disk AND accepting connections.
+     *
+     * The `listening` callback is not sufficient evidence for the caller's
+     * purposes: the very next thing that happens is a container being created
+     * with this path bind-mounted, and Docker resolves that bind at
+     * container-start time. Handing back a path that is not yet a live socket
+     * produces an OCI mount failure, which the daemon reports by leaving the
+     * container in `created` rather than by failing the start call -- i.e. a
+     * silent hang. One connect here removes that entire class of failure.
+     */
+    await this.#assertAccepting(path);
+  }
+
+  async #assertAccepting(path: string): Promise<void> {
+    const st = await stat(path);
+    if (!st.isSocket()) throw new Error(`gateway path ${path} is not a socket after listen()`);
+
+    await new Promise<void>((resolve, reject) => {
+      const probe = connect(path);
+      const done = (err?: Error) => {
+        probe.destroy();
+        clearTimeout(timer);
+        if (err) reject(new Error(`gateway socket ${path} is not accepting connections: ${err.message}`));
+        else resolve();
+      };
+      const timer = setTimeout(() => done(new Error("connect timed out after 2000ms")), 2000);
+      probe.once("connect", () => done());
+      probe.once("error", (err: Error) => done(err));
+    });
   }
 
   async close(): Promise<void> {

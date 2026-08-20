@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -55,6 +55,10 @@ describe("agent container <-> host gateway", { skip: skip === false ? undefined 
   let hostDir: string;
   let sandbox: DockerSandbox;
   const cleanup: Array<{ handle: SandboxHandle; volume: string }> = [];
+  // Volumes are recorded before the container exists, so a failed create still
+  // gets cleaned up rather than leaking a volume per run.
+  const volumes = new Set<string>();
+  const gateways = new Set<GatewayServer>();
   let lock: DockerTestLock;
 
   before(async () => {
@@ -66,16 +70,23 @@ describe("agent container <-> host gateway", { skip: skip === false ? undefined 
     // /Users but not /private/var/folders, and this is also where the real
     // gateway socket lives (config.dataDir).
     hostDir = await realpath(await mkdtemp(join(homedir(), ".codexclone-e2e-")));
+    // Create both mount-source directories up front so only the socket files
+    // themselves are new by the time a container binds them.
+    await mkdir(join(hostDir, "gw"), { recursive: true, mode: 0o700 });
+    await mkdir(join(hostDir, "jobs"), { recursive: true, mode: 0o700 });
     sandbox = new DockerSandbox({ socketPath: SOCKET, jobSpecDir: join(hostDir, "jobs") });
   });
 
+  // Every step is independently guarded: a failure part-way through cleanup
+  // must not leave containers, volumes, host directories or listening sockets
+  // behind. A leaked server handle in particular keeps the Node process alive
+  // after the last test, which looks exactly like a hang.
   after(async () => {
-    for (const { handle, volume } of cleanup) {
-      await sandbox.destroy(handle).catch(() => undefined);
-      await removeVolume(docker, volume, { force: true }).catch(() => undefined);
-    }
-    await rm(hostDir, { recursive: true, force: true });
-    await lock.release();
+    for (const gateway of gateways) await gateway.close().catch(() => undefined);
+    for (const { handle } of cleanup) await sandbox?.destroy(handle).catch(() => undefined);
+    for (const volume of volumes) await removeVolume(docker, volume, { force: true }).catch(() => undefined);
+    if (hostDir) await rm(hostDir, { recursive: true, force: true }).catch(() => undefined);
+    await lock?.release().catch(() => undefined);
   });
 
   async function runTurn(
@@ -83,7 +94,13 @@ describe("agent container <-> host gateway", { skip: skip === false ? undefined 
     over: Partial<SandboxSpec> = {},
     job: Partial<DockerSandboxSpec["job"]> = {},
   ): Promise<{ rows: AnyEventRow[]; fake: FakeUpstream; volume: string }> {
-    const socketPath = join(hostDir, `gw-${randomUUID().slice(0, 8)}`, "gateway.sock");
+    // A long-lived directory with a unique socket name inside it, rather than a
+    // fresh directory per run. Docker Desktop propagates host filesystem
+    // changes into its VM asynchronously, and a brand-new directory is the
+    // slowest case to become visible -- which is what made container start
+    // intermittently fail to find the socket. Production has the same shape:
+    // one stable dir (config.dataDir) holding a stable gateway.sock.
+    const socketPath = join(hostDir, "gw", `${randomUUID().slice(0, 8)}.sock`);
     const fake = new FakeUpstream(turns);
     const gateway = new GatewayServer({
       socketPath,
@@ -91,33 +108,42 @@ describe("agent container <-> host gateway", { skip: skip === false ? undefined 
       upstream: fake,
       budget: { maxTurns: 10, maxCostUsd: 100, wallClockMs: 120_000 },
     });
-    await gateway.listen();
 
     const taskId = `e2e-${randomUUID().slice(0, 8)}`;
     const volume = `codex-e2e-${taskId}`;
-    const spec: DockerSandboxSpec = {
-      taskId,
-      runId: `run-${taskId}`,
-      image: IMAGE,
-      mode: "code",
-      volumeName: volume,
-      gatewaySocketPath: socketPath,
-      limits: { ...DEFAULT_LIMITS, memoryMb: 512, cpus: 1, pids: 128 },
-      env: {},
-      job: { prompt: "write a greeting", baseSha: "0".repeat(40), model: "gpt-5", ...job },
-      ...over,
-    };
+    volumes.add(volume);
+    gateways.add(gateway);
 
-    const handle = await sandbox.create(spec as SandboxSpec);
-    cleanup.push({ handle, volume });
+    // listen() does not resolve until the socket is on disk and accepting, so
+    // the container below can safely bind-mount it.
+    await gateway.listen();
 
-    const rows: AnyEventRow[] = [];
     try {
+      const spec: DockerSandboxSpec = {
+        taskId,
+        runId: `run-${taskId}`,
+        image: IMAGE,
+        mode: "code",
+        volumeName: volume,
+        gatewaySocketPath: socketPath,
+        limits: { ...DEFAULT_LIMITS, memoryMb: 512, cpus: 1, pids: 128 },
+        env: {},
+        job: { prompt: "write a greeting", baseSha: "0".repeat(40), model: "gpt-5", ...job },
+        ...over,
+      };
+
+      const handle = await sandbox.create(spec as SandboxSpec);
+      cleanup.push({ handle, volume });
+
+      const rows: AnyEventRow[] = [];
       for await (const row of sandbox.attach(handle)) rows.push(row);
+      return { rows, fake, volume };
     } finally {
-      await gateway.close();
+      // Must cover the create() failure path too: an open server handle keeps
+      // the Node process alive long after the tests have finished.
+      await gateway.close().catch(() => undefined);
+      gateways.delete(gateway);
     }
-    return { rows, fake, volume };
   }
 
   it("completes a full turn: setup, tool call, message, terminal status", async () => {

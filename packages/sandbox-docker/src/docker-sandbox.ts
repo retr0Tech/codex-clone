@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, stat, unlink, writeFile } from "node:fs/promises";
+import { connect } from "node:net";
 import { join } from "node:path";
 import Docker from "dockerode";
 import type {
@@ -62,6 +63,8 @@ export interface DockerSandboxOptions {
   defaultMaxTurns?: number;
   /** Bound on `container.start()`, so a stalled daemon cannot hold a slot forever. */
   startTimeoutMs?: number;
+  /** Attempts at create+start, to absorb Docker Desktop's async mount propagation. */
+  startAttempts?: number;
   /** Container stderr is diagnostics, not transcript. Route it at the logging boundary. */
   onStderr?: (line: string, handle: SandboxHandle) => void;
 }
@@ -74,12 +77,41 @@ export class ImageNotFoundError extends Error {
 }
 
 export class GatewaySocketMissingError extends Error {
-  constructor(path: string) {
+  constructor(path: string, detail?: string) {
     super(
-      `Model-gateway socket "${path}" does not exist. Start the worker gateway before creating a sandbox -- ` +
-        `Docker would otherwise silently bind-mount a directory in its place and every model call would fail.`,
+      `Model-gateway socket "${path}" is not ready${detail ? ` (${detail})` : ""}. ` +
+        `Start the worker gateway and await its listening event before creating a sandbox -- ` +
+        `Docker would otherwise bind-mount a directory in its place, or fail to start the container at all.`,
     );
     this.name = "GatewaySocketMissingError";
+  }
+}
+
+/**
+ * `container.start()` resolving does NOT mean the container is running.
+ *
+ * When the OCI runtime fails during init -- most commonly because a bind
+ * source is not visible inside the Docker Desktop VM -- the daemon still
+ * answers the start request successfully and records the failure on the
+ * container instead, leaving it in `created` with `State.Error` set. Following
+ * that container's logs then blocks forever, because a container that never
+ * ran never closes its log stream.
+ *
+ * So a silent hang is the default failure mode here unless we explicitly go
+ * and look. This error is what we surface instead.
+ */
+export class SandboxStartError extends Error {
+  constructor(
+    readonly containerId: string,
+    readonly state: { Status?: string; ExitCode?: number; Error?: string },
+  ) {
+    const detail = state.Error?.trim();
+    super(
+      `Sandbox container ${containerId.slice(0, 12)} failed to start ` +
+        `(status=${state.Status ?? "unknown"}, exitCode=${state.ExitCode ?? "unknown"})` +
+        `${detail ? `: ${detail}` : ""}`,
+    );
+    this.name = "SandboxStartError";
   }
 }
 
@@ -109,28 +141,83 @@ export class DockerSandbox implements SandboxProvider {
     const sandboxId = randomUUID();
     const jobSpecHostPath = await this.#writeJobSpec(sandboxId, full);
 
+    const startTimeoutMs = this.options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
+    const attempts = Math.max(1, this.options.startAttempts ?? DEFAULT_START_ATTEMPTS);
+
     try {
-      const container = await this.docker.createContainer(
-        buildContainerConfig({
-          spec,
-          sandboxId,
-          containerName: `codex-sbx-${sandboxId.slice(0, 12)}`,
-          jobSpecHostPath,
-          ...(full.overrideCommand ? { overrideCommand: full.overrideCommand } : {}),
-        }),
-      );
-      // A start that never returns would hold one of only three concurrency
-      // slots forever and look identical to a sandbox that is working. Bound
-      // it, and leave the container behind for `destroy` to clean up.
-      await withTimeout(
-        container.start(),
-        this.options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS,
-        `container ${container.id.slice(0, 12)} did not start`,
-      );
-      return { id: sandboxId, providerRef: container.id };
+      let lastError: unknown = null;
+
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        const container = await this.docker.createContainer(
+          buildContainerConfig({
+            spec,
+            sandboxId,
+            // The name must be unique per attempt; a container left behind by
+            // a failed start still owns its name until it is removed.
+            containerName: `codex-sbx-${sandboxId.slice(0, 12)}${attempt > 1 ? `-r${attempt}` : ""}`,
+            jobSpecHostPath,
+            ...(full.overrideCommand ? { overrideCommand: full.overrideCommand } : {}),
+          }),
+        );
+
+        try {
+          // A start that never returns would hold one of only three
+          // concurrency slots forever and look identical to a sandbox that is
+          // working.
+          await withTimeout(
+            container.start(),
+            startTimeoutMs,
+            `container ${container.id.slice(0, 12)} did not start`,
+          );
+          // start() resolving is not proof of anything -- see SandboxStartError.
+          await this.#assertLeftCreated(container, startTimeoutMs);
+          return { id: sandboxId, providerRef: container.id };
+        } catch (err) {
+          await container.remove({ force: true, v: false }).catch(() => undefined);
+          if (!isTransientMountFailure(err) || attempt === attempts) throw err;
+          // Docker Desktop propagates the host filesystem into its VM
+          // asynchronously, so a socket created milliseconds ago can still be
+          // invisible to the OCI runtime even though it is listening and
+          // connectable on the host. Retrying briefly closes that window;
+          // anything that survives every attempt is a real fault and is thrown.
+          lastError = err;
+          await delay(RETRY_BACKOFF_MS * attempt);
+        }
+      }
+
+      throw lastError ?? new Error("sandbox failed to start for an unknown reason");
     } catch (err) {
       await unlink(jobSpecHostPath).catch(() => undefined);
       throw err;
+    }
+  }
+
+  /**
+   * Bounded, and it throws rather than waiting: `created` means the OCI
+   * runtime never got the container off the ground, and no amount of further
+   * waiting changes that. `exited` is fine -- a short command can finish
+   * before the first poll.
+   */
+  async #assertLeftCreated(container: Docker.Container, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const info = await container.inspect();
+      const state = info.State as {
+        Status?: string;
+        Running?: boolean;
+        ExitCode?: number;
+        Error?: string;
+        StartedAt?: string;
+      };
+
+      const neverRan = !state.StartedAt || state.StartedAt.startsWith("0001-01-01");
+      if (state.Error && state.Error.trim() !== "" && neverRan) {
+        throw new SandboxStartError(container.id, state);
+      }
+      if (state.Running === true || state.Status === "exited" || state.Status === "dead") return;
+
+      if (Date.now() >= deadline) throw new SandboxStartError(container.id, state);
+      await delay(POLL_MS);
     }
   }
 
@@ -146,6 +233,14 @@ export class DockerSandbox implements SandboxProvider {
   async *attach(handle: SandboxHandle): AsyncIterable<AnyEventRow> {
     const container = this.docker.getContainer(handle.providerRef);
     const info = await container.inspect();
+
+    // Never follow the logs of a container that has not run. Docker keeps that
+    // stream open forever, so this would hang rather than fail -- which is how
+    // a failed start turns into a test suite that never finishes.
+    if (info.State.Status === "created") {
+      throw new SandboxStartError(container.id, info.State as { Status?: string; ExitCode?: number; Error?: string });
+    }
+
     const labels = info.Config.Labels ?? {};
     const parser = new NdjsonEventParser({
       runId: labels[LABEL_RUN_ID] ?? "",
@@ -292,14 +387,36 @@ export class DockerSandbox implements SandboxProvider {
     }
   }
 
+  /**
+   * The socket must exist AND have something listening on it before the
+   * container is created.
+   *
+   * A stat alone is not enough: the file can be on disk while the server is
+   * still binding, and Docker Desktop resolves the bind at container-start
+   * time. A real connect is the only check that proves the far end is
+   * accepting, and it costs a millisecond.
+   */
   async #assertGatewaySocket(path: string): Promise<void> {
+    let st: Awaited<ReturnType<typeof stat>>;
     try {
-      const st = await stat(path);
-      if (!st.isSocket()) throw new GatewaySocketMissingError(path);
+      st = await stat(path);
     } catch (err) {
-      if (err instanceof GatewaySocketMissingError) throw err;
-      throw new GatewaySocketMissingError(path);
+      throw new GatewaySocketMissingError(path, (err as NodeJS.ErrnoException).code ?? "stat failed");
     }
+    if (!st.isSocket()) throw new GatewaySocketMissingError(path, "path exists but is not a socket");
+
+    await new Promise<void>((resolve, reject) => {
+      const probe = connect(path);
+      const done = (err?: Error) => {
+        probe.destroy();
+        clearTimeout(timer);
+        if (err) reject(new GatewaySocketMissingError(path, `nothing is listening (${err.message})`));
+        else resolve();
+      };
+      const timer = setTimeout(() => done(new Error(`connect timed out after ${SOCKET_PROBE_MS}ms`)), SOCKET_PROBE_MS);
+      probe.once("connect", () => done());
+      probe.once("error", (err: Error) => done(err));
+    });
   }
 
   #jobSpecPath(sandboxId: string): string {
@@ -334,6 +451,43 @@ function isConflict(err: unknown): boolean {
 
 /** Two minutes: enough for a cold image on a loaded laptop, short of forever. */
 export const DEFAULT_START_TIMEOUT_MS = 120_000;
+/** Retries exist only to absorb Docker Desktop's async host-mount propagation. */
+export const DEFAULT_START_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = 150;
+const POLL_MS = 25;
+const SOCKET_PROBE_MS = 2_000;
+
+/**
+ * A start failure caused by a bind source the OCI runtime could not open.
+ *
+ * On Docker Desktop this is usually transient: the host filesystem is
+ * propagated into the VM asynchronously, so a socket or file created
+ * milliseconds ago may not be visible inside the VM yet -- even though it
+ * exists, is listening, and is connectable from the host. Anything else (a
+ * genuinely missing path, a permission problem) fails identically on every
+ * attempt and surfaces after the last one.
+ *
+ * The daemon reports this two different ways depending on where it notices:
+ * as a rejected start call, or as an error recorded on a container left in
+ * `created`. Both shapes are matched here.
+ */
+function isTransientMountFailure(err: unknown): boolean {
+  const parts: string[] = [];
+  if (err instanceof SandboxStartError) parts.push(err.state.Error ?? "");
+  if (err instanceof Error) parts.push(err.message);
+  const json = (err as { json?: { message?: unknown } } | null)?.json?.message;
+  if (typeof json === "string") parts.push(json);
+
+  const message = parts.join(" ").toLowerCase();
+  return (
+    message.includes("no such file or directory") &&
+    (message.includes("mount") || message.includes("socket_mnt") || message.includes("container init"))
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
