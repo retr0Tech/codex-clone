@@ -17,3 +17,9 @@ build/
 .DS_Store
 coverage/
 .pnpm-store/
+
+# Agent worktrees are full repository checkouts created inside .claude/ during
+# parallel development; they must never be committed. settings.local.json holds
+# personal tool configuration.
+.claude/worktrees/
+.claude/settings.local.json
