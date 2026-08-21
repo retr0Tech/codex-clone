@@ -16,7 +16,7 @@ import { PublishError, publishTask } from "./runner/publish.js";
 import { RunQueue } from "./runner/queue.js";
 import { recordUsage } from "./runner/run-state.js";
 import type { SupervisorDeps } from "./runner/supervisor.js";
-import { RunNowError, Scheduler } from "./scheduler/index.js";
+import { NoSuchJobError, RunNowError, Scheduler } from "./scheduler/index.js";
 
 /**
  * Worker entrypoint.
@@ -123,7 +123,8 @@ async function main(): Promise<void> {
         } catch (error) {
           const message = redact(error instanceof Error ? error.message : String(error));
           console.warn(`[worker] run-now failed: ${message}`);
-          return { status: error instanceof RunNowError ? 409 : 500, body: { error: message } };
+          const status = error instanceof NoSuchJobError ? 404 : error instanceof RunNowError ? 409 : 500;
+          return { status, body: { error: message } };
         }
       },
     },

@@ -8,8 +8,10 @@ rewriting the orchestrator.
 > **Status.** The vertical slice is complete. Pick one of your repositories and
 > a branch, describe a change, and watch reasoning, tool calls and a real diff
 > stream in live — then push the branch and open a pull request, all from the
-> host. See [The end-to-end flow](#the-end-to-end-flow) to follow it yourself,
-> and [What works today](#what-works-today) for what is and is not built.
+> host. The same run loop is also on a schedule: a cron expression with a
+> timezone gets a fresh container on a cadence and pushes what it produced. See
+> [The end-to-end flow](#the-end-to-end-flow) to follow it yourself, and
+> [What works today](#what-works-today) for what is and is not built.
 
 ## Requirements
 
@@ -54,7 +56,7 @@ to create a task.
 pnpm build && pnpm typecheck && pnpm lint && pnpm test
 ```
 
-Expect **346 tests, 0 failures**, in roughly 20 seconds. Two tests skip unless
+Expect **398 tests, 0 failures**, in roughly 20 seconds. Two tests skip unless
 `ripgrep` is installed on the host (`brew install ripgrep`); it is baked into
 the agent image, so this affects only host-side runs. The Docker- and
 Postgres-dependent suites skip with a reason when either is unavailable, and
@@ -142,14 +144,69 @@ A real run of exactly that, streamed live:
 - **Cancel** — closes the gateway meter first, so no further model call is
   admitted even mid-turn, then SIGTERMs with a grace period. Partial work
   survives, because the workspace volume is the live state.
+- **Scheduled jobs** (`/scheduled`) — a repo, a branch, a prompt and a cron
+  expression with a timezone. The worker claims due jobs out of Postgres with
+  the same `FOR UPDATE SKIP LOCKED` the run queue uses, so a schedule survives a
+  restart and cannot double-fire across workers. See
+  [Scheduled jobs](#scheduled-jobs) for what the two awkward cases do.
 - **`/mock/transcript`** — replays a recorded run through the same reducer the
   socket feeds, including cancellation, budget exhaustion, and a failed setup
   script. Useful for seeing states a happy run does not produce.
 
-**Not built:** archive and restore via cold snapshots (milestone 8), scheduled
-jobs (milestone 9), and the cost/budget UI (milestone 10). The `/scheduled` page
-still renders fixtures, and the idle reaper that would move a workspace to the
-cold tier does not exist — a task's volume lives until you remove it.
+**Not built:** archive and restore via cold snapshots (milestone 8) and the
+cost/budget UI (milestone 10). The idle reaper that would move a workspace to
+the cold tier does not exist — a task's volume lives until you remove it.
+
+## Scheduled jobs
+
+A scheduled execution is an ordinary task with an ordinary queued run, so the
+run loop, the transcript, the derived diff and the push are all the ones you
+already saw. What the scheduler adds is the claim and two decisions.
+
+```
+tick, every 30s:
+  settle()  finished occurrences: push the branch, close them out
+  claim()   SELECT … WHERE enabled AND next_run_at <= now()
+            FOR UPDATE SKIP LOCKED
+              → fresh task + queued run   → the milestone 5 run loop
+              → or a 'skipped' row + why
+```
+
+Settling runs *first*, and that ordering is load-bearing: `claimed` and
+`running` **are** the overlap rule, so an occurrence that has finished but not
+been closed out would make the next one record a skip against work that was
+already done.
+
+**Every execution gets a brand-new task**, and therefore a workspace volume that
+has never existed. That is not a policy applied on top — there is simply no task
+for a scheduled run to inherit a warm volume from, which is the opposite of how
+a follow-up turn works.
+
+**Overlap.** If the previous execution is still in flight when the next
+occurrence comes due, `skip` records a `skipped` row saying so and `queue`
+starts it anyway. A skip is never silent: a schedule that quietly did nothing
+looks exactly like one that is broken, and only one of those is fine.
+
+**Downtime.** `next_run_at` is recomputed from *now*, never stepped forward one
+occurrence at a time from the stale value, so five hours of downtime on a
+five-minute schedule fires **once** on recovery and is then back on cadence.
+Nothing has to count what was missed. With catch-up switched off, the missed
+occurrence is recorded as skipped instead — still visible, still not sixty rows.
+
+**The result.** An unattended diff that dies with its container is worthless, so
+the finished workspace is committed and pushed to
+`scheduled/<job>/<timestamp>` — the *occurrence's* timestamp, so the 03:00 run
+is called 03:00 even when the queue was busy until 03:20 — and optionally opened
+as a pull request. That is the milestone 7 publish path unchanged, called once
+the run is terminal: pushing rewrites `.git` inside the volume, so doing it
+under a live agent would race the process writing the working tree.
+
+Cron parsing lives in `packages/cron` (croner, pinned) because both the web app
+and the worker need it: the web app computes the first `next_run_at` when a job
+is created, the worker computes every one after that, and two implementations of
+"when does this fire next" is how a schedule comes to disagree with the page
+that shows it. Five fields, or `@daily` and friends; six-field expressions with
+seconds are refused rather than silently mis-scheduled against a 30-second tick.
 
 ## Architecture
 
@@ -206,6 +263,7 @@ the options rejected and the risks knowingly accepted — is in
 | `apps/worker` | Container lifecycle, event log, WebSocket hub, scheduler, model gateway |
 | `apps/agent-runtime` | The agent loop that runs **inside** the container |
 | `packages/core` | Frozen contracts: `SandboxProvider`, `SnapshotStore`, event union, budgets, redaction |
+| `packages/cron` | Cron expressions with timezones, shared by the web app and the scheduler |
 | `packages/sandbox-docker` | Docker implementation of `SandboxProvider` |
 | `packages/secrets` | AES-256-GCM credential store |
 | `packages/github` | Octokit client and host-side bare-repo mirrors |
