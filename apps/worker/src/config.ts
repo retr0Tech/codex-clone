@@ -2,15 +2,33 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_BUDGET, DEFAULT_LIMITS } from "@codex-clone/core";
 
+/**
+ * Reads an environment variable, treating an EMPTY value as absent.
+ *
+ * A .env file commonly carries placeholder keys with nothing after the `=`
+ * (see .env.example). Using `??` alone would accept "" as a real value, which
+ * silently produced a relative gateway socket path from an empty
+ * CODEX_DATA_DIR. Blank means "not set", not "set to nothing".
+ */
+function raw(key: string): string | undefined {
+  const v = process.env[key];
+  return v === undefined || v.trim() === "" ? undefined : v;
+}
+
 function env(key: string, fallback?: string): string {
-  const v = process.env[key] ?? fallback;
+  const v = raw(key) ?? fallback;
   if (v === undefined) throw new Error(`Missing required env var: ${key}`);
   return v;
 }
 
 function num(key: string, fallback: number): number {
-  const raw = process.env[key];
-  return raw === undefined ? fallback : Number(raw);
+  const v = raw(key);
+  if (v === undefined) return fallback;
+  const parsed = Number(v);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Env var ${key} must be a number, got: ${v}`);
+  }
+  return parsed;
 }
 
 /**
@@ -23,7 +41,7 @@ const defaultDockerSocket = join(homedir(), ".docker", "run", "docker.sock");
 
 export const config = {
   databaseUrl: env("DATABASE_URL", "postgres://codex:codex@localhost:5432/codex_clone"),
-  dockerSocket: process.env.DOCKER_SOCKET ?? defaultDockerSocket,
+  dockerSocket: raw("DOCKER_SOCKET") ?? defaultDockerSocket,
 
   /** WebSocket hub. Lives in the worker because the worker sees events first. */
   wsPort: num("WORKER_WS_PORT", 8787),
@@ -31,7 +49,7 @@ export const config = {
   bindHost: env("BIND_HOST", "127.0.0.1"),
 
   /** Model-gateway unix socket, bind-mounted into every sandbox. */
-  gatewaySocketPath: process.env.GATEWAY_SOCKET_PATH ?? join(dataDir(), "gateway.sock"),
+  gatewaySocketPath: raw("GATEWAY_SOCKET_PATH") ?? join(dataDir(), "gateway.sock"),
 
   /** AES-256-GCM key for credentials at rest. Never committed, never logged. */
   encryptionKey: env("APP_ENCRYPTION_KEY"),
@@ -52,5 +70,5 @@ export const config = {
 } as const;
 
 function dataDir(): string {
-  return process.env.CODEX_DATA_DIR ?? join(homedir(), ".codexclone");
+  return raw("CODEX_DATA_DIR") ?? join(homedir(), ".codexclone");
 }
