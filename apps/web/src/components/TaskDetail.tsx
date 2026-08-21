@@ -1,56 +1,58 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import Link from "next/link";
-import { transcriptItems, isBackfilling, isTerminal } from "../lib/eventReducer";
-import { useMockStream, type StreamMode } from "../lib/useMockStream";
-import { historyForTask, playbackForTask, runsForTask } from "../mocks/runs";
-import type { MockRepo, MockTask } from "../mocks/data";
+import { useState } from "react";
+import { isTerminal, transcriptItems } from "../lib/eventReducer";
+import { useTranscriptStream, type ConnectionState } from "../lib/useTranscriptStream";
+import type { RunView, TaskView } from "../lib/types";
 import { StickToBottom } from "./StickToBottom";
 import { Transcript } from "./transcript/Transcript";
 import { DiffCard, DiffView } from "./diff/DiffView";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
 import { Segmented, Textarea } from "./ui/Field";
-import { Spinner, EmptyState, DiffStat, Kbd } from "./ui/misc";
+import { Spinner, EmptyState, Kbd } from "./ui/misc";
 import { cn } from "./ui/cn";
 import { formatDuration, shortSha } from "../lib/format";
 import { STATUS_META } from "../lib/status";
 
 type Tab = "transcript" | "diff";
 
-export function TaskDetail({
-  task,
-  repo,
-  initialMode,
-}: {
-  task: MockTask;
-  repo: MockRepo;
-  initialMode: StreamMode;
-}) {
+/**
+ * One task, live.
+ *
+ * Everything below the header is folded by `transcriptReducer` -- the same
+ * reducer, the same frames, whether they arrived from the history endpoint on
+ * page load or from the socket a millisecond ago. There is no second rendering
+ * path for "replayed" content, which is why a reload cannot show something the
+ * live view could not (PLAN.md §3.6).
+ *
+ * The server-rendered `task` and `runs` are metadata only: repo, branch, pinned
+ * SHA, cost so far. The moment the stream produces a status it takes over,
+ * because the stream is ahead of anything a page render could have read.
+ */
+export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunView[]; wsUrl: string }) {
   const [tab, setTab] = useState<Tab>("transcript");
   const [followUp, setFollowUp] = useState("");
 
-  const history = useMemo(() => historyForTask(task.id), [task.id]);
-  const frames = useMemo(() => playbackForTask(task.id), [task.id]);
-  const runs = useMemo(() => runsForTask(task.id), [task.id]);
-
-  const stream = useMockStream({
-    taskId: task.id,
-    runId: runs[runs.length - 1]?.id ?? null,
-    frames,
-    history,
-    initialMode,
-  });
-
+  const stream = useTranscriptStream({ taskId: task.id, wsUrl });
   const { state } = stream;
   const items = transcriptItems(state);
-  const statusMeta = STATUS_META[state.status];
-  const running = !isTerminal(state.status);
+
+  const latestRun = runs[runs.length - 1] ?? task.latestRun;
+  // The transcript wins once it has said anything: it is the live truth, and
+  // the row was read before the page was sent.
+  const status = state.events.length > 0 ? state.status : (latestRun?.status ?? "queued");
+  const statusMeta = STATUS_META[status];
+  const running = !isTerminal(status);
+  const stopReason = state.stopReason ?? latestRun?.stopReason ?? null;
+  const runId = state.runId ?? latestRun?.id ?? null;
+
   const wallClock =
-    history.length > 1
-      ? Date.parse(history[history.length - 1]!.createdAt) - Date.parse(history[0]!.createdAt)
+    state.events.length > 1
+      ? Date.parse(state.events[state.events.length - 1]!.createdAt) - Date.parse(state.events[0]!.createdAt)
       : 0;
+
+  const spent = runs.reduce((total, run) => total + run.costUsd, 0);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -63,7 +65,7 @@ export function TaskDetail({
             <div className="min-w-0">
               <h1 className="truncate text-[16px] font-semibold tracking-tight">{task.title}</h1>
               <p className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 font-mono text-[11.5px] text-fg-faint">
-                <span className="text-fg-muted">{repo.fullName}</span>
+                <span className="text-fg-muted">{task.repoFullName}</span>
                 <span aria-hidden>·</span>
                 <span>{task.baseBranch}</span>
                 <span aria-hidden>·</span>
@@ -81,7 +83,7 @@ export function TaskDetail({
                 {task.mode === "ask" ? "Ask" : "Code"}
               </Badge>
               <Badge tone={statusMeta.tone} dot>
-                {running && stream.playing ? (
+                {running ? (
                   <span className="flex items-center gap-1.5">
                     <Spinner className="size-3" />
                     {statusMeta.label}
@@ -93,9 +95,7 @@ export function TaskDetail({
             </div>
           </div>
 
-          {state.stopReason ? (
-            <p className="mt-2 text-[12.5px] text-fg-muted">{state.stopReason}</p>
-          ) : null}
+          {stopReason ? <p className="mt-2 text-[12.5px] text-fg-muted">{stopReason}</p> : null}
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <Segmented<Tab>
@@ -126,8 +126,18 @@ export function TaskDetail({
             <Button size="sm" variant="secondary" disabled title="Wired up in milestone 7">
               Open PR
             </Button>
-            {running ? (
-              <Button size="sm" variant="danger" disabled title="Cancel rides the same socket; wired up in milestone 10">
+            {running && runId ? (
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => stream.cancel(runId)}
+                disabled={stream.connection !== "live"}
+                title={
+                  stream.connection === "live"
+                    ? "Closes the gateway meter, then SIGTERM with a grace period. Partial work is kept."
+                    : "Cancel rides the socket; reconnecting…"
+                }
+              >
                 Cancel
               </Button>
             ) : null}
@@ -136,52 +146,20 @@ export function TaskDetail({
       </header>
 
       {/* ---------------------------------------------------------------- */}
-      {/* playback controls -- stands in for the live socket                */}
+      {/* connection strip                                                  */}
       {/* ---------------------------------------------------------------- */}
       <div className="shrink-0 border-b border-border bg-bg-sunken px-5 py-2 lg:px-8">
         <div className="mx-auto flex max-w-4xl flex-wrap items-center gap-x-3 gap-y-2 text-[12px] text-fg-muted">
-          <span className="flex items-center gap-1.5 font-medium text-fg-faint">
-            <svg viewBox="0 0 12 12" className="size-3" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.4">
-              <path d="M1.5 6h2l1.2-3 2 6 1.3-3h2.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            Mock stream
-          </span>
-          <Segmented<StreamMode>
-            size="sm"
-            value={stream.mode}
-            onChange={stream.setMode}
-            label="Stream mode"
-            options={[
-              { value: "live", label: "Live", hint: "Replays the frame script on timers, deltas included" },
-              { value: "history", label: "History", hint: "Folds only the durable rows, as a reload would" },
-            ]}
-          />
-          {stream.mode === "live" ? (
-            <>
-              <Segmented<string>
-                size="sm"
-                value={String(stream.speed)}
-                onChange={(v) => stream.setSpeed(Number(v))}
-                label="Playback speed"
-                options={[
-                  { value: "1", label: "1×" },
-                  { value: "4", label: "4×" },
-                  { value: "16", label: "16×" },
-                ]}
-              />
-              <Button size="sm" variant="ghost" onClick={stream.restart}>
-                Restart
-              </Button>
-              <span className="font-mono text-[11px] tabular-nums text-fg-faint">
-                {stream.delivered}/{stream.total} frames
-              </span>
-            </>
+          <ConnectionPill connection={stream.connection} backfilling={stream.backfilling} />
+          {stream.error ? (
+            <span className="text-[11.5px] text-warn">history unavailable: {stream.error}</span>
           ) : null}
           <span className="h-px flex-1" />
           <span className="font-mono text-[11px] tabular-nums text-fg-faint">
+            {runs.length > 0 ? `${runs.length} run${runs.length === 1 ? "" : "s"} · ` : ""}
             seq {state.lastSeq}
-            {isBackfilling(state) ? " · backfilling" : ""}
             {wallClock > 0 ? ` · ${formatDuration(wallClock)}` : ""}
+            {spent > 0 ? ` · $${spent.toFixed(4)}` : ""}
           </span>
         </div>
       </div>
@@ -193,7 +171,7 @@ export function TaskDetail({
           rather than inheriting the other's scroll offset. */}
       <StickToBottom
         key={tab}
-        dep={stream.delivered}
+        dep={items.length}
         enabled={tab === "transcript"}
         className="min-h-0 flex-1 overflow-y-auto px-5 py-6 lg:px-8"
       >
@@ -201,11 +179,11 @@ export function TaskDetail({
           {tab === "transcript" ? (
             items.length === 0 ? (
               <EmptyState
-                title={runs.length === 0 ? "No transcript for this task" : "Nothing on the wire yet"}
+                title={running ? "Nothing on the wire yet" : "No transcript for this task"}
                 body={
-                  runs.length === 0
-                    ? "This task has no run in the fixture set. Once the worker exists, its event log would be backfilled here from seq 0."
-                    : "The run has been claimed but has not emitted its first event. Live frames appear here as they arrive."
+                  running
+                    ? "The run is queued behind the worker's concurrency limit, or the container has not emitted its first event. Frames appear here as they arrive."
+                    : "This task produced no events. If the worker was not running when it was created, start it and the queued run will be claimed."
                 }
               />
             ) : (
@@ -216,7 +194,7 @@ export function TaskDetail({
           ) : (
             <EmptyState
               title="No diff for this run"
-              body="The host derives the diff with git diff against the base SHA after each turn. This run never produced one — it stopped before reaching that point."
+              body="The host derives the diff with git diff against the base SHA after each turn. This run has not produced one yet."
               action={
                 <Button size="sm" onClick={() => setTab("transcript")}>
                   Back to transcript
@@ -250,31 +228,47 @@ export function TaskDetail({
                 <Kbd>↵</Kbd>
                 to send
               </p>
-              <div className="flex items-center gap-2">
-                {task.additions + task.deletions > 0 ? (
-                  <DiffStat additions={task.additions} deletions={task.deletions} />
-                ) : null}
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled
-                  title="Follow-up turns land in milestone 7"
-                  className={cn(followUp.trim().length === 0 && "opacity-45")}
-                >
-                  Send
-                </Button>
-              </div>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled
+                title="Follow-up turns land in milestone 7"
+                className={cn(followUp.trim().length === 0 && "opacity-45")}
+              >
+                Send
+              </Button>
             </div>
           </div>
-          <p className="mt-2 text-[11.5px] text-fg-faint">
-            No backend is wired up yet.{" "}
-            <Link href="/mock/transcript" className="text-accent hover:underline">
-              Play another fixture
-            </Link>{" "}
-            to see the streaming states.
-          </p>
         </div>
       </footer>
     </div>
+  );
+}
+
+/**
+ * Says which of the three states the socket is in, and whether the client is
+ * still catching up on the server's backlog. Worth surfacing: "live" and
+ * "reconnecting, showing you history" look identical otherwise, and only one of
+ * them means what you are reading is current.
+ */
+function ConnectionPill({ connection, backfilling }: { connection: ConnectionState; backfilling: boolean }) {
+  const meta: Record<ConnectionState, { label: string; tone: "ok" | "warn" | "neutral" }> = {
+    connecting: { label: "Connecting", tone: "neutral" },
+    live: { label: backfilling ? "Catching up" : "Live", tone: backfilling ? "neutral" : "ok" },
+    reconnecting: { label: "Reconnecting", tone: "warn" },
+  };
+  const { label, tone } = meta[connection];
+
+  return (
+    <span className="flex items-center gap-1.5">
+      <Badge tone={tone} dot>
+        {label}
+      </Badge>
+      <span className="text-[11.5px] text-fg-faint">
+        {connection === "live" && !backfilling
+          ? "frames stream from the worker; token deltas are overlay only"
+          : "showing what has been persisted so far"}
+      </span>
+    </span>
   );
 }

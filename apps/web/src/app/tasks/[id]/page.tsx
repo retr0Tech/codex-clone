@@ -1,29 +1,32 @@
 import { notFound } from "next/navigation";
 import { TaskDetail } from "../../../components/TaskDetail";
-import { repoById, taskById } from "../../../mocks/data";
-import type { StreamMode } from "../../../lib/useMockStream";
+import { getTask, listRuns } from "../../api/_lib/tasks";
+import { db } from "../../api/_lib/settings-store";
 
 /**
- * `?stream=live` replays the fixture through the reducer on timers; the default
- * folds the durable history exactly as a reload will once the WebSocket hub
- * exists. Same reducer either way — that is the property being demonstrated.
+ * The task page.
+ *
+ * The task record and its runs are read on the server so the shell paints with
+ * real metadata immediately; the transcript itself arrives in the client, from
+ * the history endpoint and then the WebSocket. Splitting it that way means a
+ * task that has not emitted a single event still renders as a real page rather
+ * than as a spinner waiting on a socket.
  */
-export default async function TaskPage({
-  params,
-  searchParams,
-}: {
-  params: Promise<{ id: string }>;
-  searchParams: Promise<{ stream?: string }>;
-}) {
+
+export const dynamic = "force-dynamic";
+
+export default async function TaskPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const { stream } = await searchParams;
 
-  const task = taskById(id);
+  const database = db();
+  const task = await getTask(database, id);
   if (!task) notFound();
-  const repo = repoById(task.repoId);
-  if (!repo) notFound();
+  const runs = await listRuns(database, id);
 
-  const initialMode: StreamMode = stream === "live" ? "live" : "history";
+  // Read at request time on the server: the browser bundle would otherwise need
+  // NEXT_PUBLIC_WS_URL inlined at build time, and the worker's port is a
+  // deployment detail, not a build-time constant.
+  const wsUrl = process.env["NEXT_PUBLIC_WS_URL"] ?? "ws://127.0.0.1:8787";
 
-  return <TaskDetail task={task} repo={repo} initialMode={initialMode} />;
+  return <TaskDetail task={task} runs={runs} wsUrl={wsUrl} />;
 }

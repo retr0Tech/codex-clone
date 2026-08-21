@@ -8,8 +8,9 @@ import { Badge } from "./ui/Badge";
 import { ThemeToggle } from "./ThemeToggle";
 import { cn } from "./ui/cn";
 import { useWorkspace } from "./WorkspaceContext";
-import { mockArchivedTasks, mockScheduledJobs, mockTasks } from "../mocks/data";
-import { TASK_STATUS_META } from "../lib/status";
+import { mockScheduledJobs } from "../mocks/data";
+import { useTasks } from "../lib/useTasks";
+import { STATUS_META, TASK_STATUS_META } from "../lib/status";
 
 function NavLink({
   href,
@@ -80,8 +81,15 @@ const icons = {
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { repos, repo, branch, setRepoId, setBranch } = useWorkspace();
-  const repoTasks = mockTasks.filter((t) => t.repoId === repo.id);
+  const { repos, repo, branches, branch, loadingRepos, error, setRepoFullName, setBranch, refreshRepos } =
+    useWorkspace();
+  const { tasks } = useTasks();
+
+  const active = tasks.filter((t) => t.status !== "archived");
+  const archived = tasks.filter((t) => t.status === "archived");
+  // Scoped to the selected repository: the sidebar answers "what is happening
+  // in the thing I am looking at", and the home page answers "everything".
+  const repoTasks = repo ? active.filter((t) => t.repoFullName === repo.fullName) : [];
 
   return (
     <div className="flex h-full flex-col">
@@ -95,35 +103,59 @@ export function Sidebar() {
 
       <div className="shrink-0 border-b border-border px-3 py-3">
         <Label htmlFor="sidebar-repo">Repository</Label>
-        <Select id="sidebar-repo" value={repo.id} onChange={(e) => setRepoId(e.target.value)} className="mb-2">
+        <Select
+          id="sidebar-repo"
+          value={repo?.fullName ?? ""}
+          onChange={(e) => setRepoFullName(e.target.value)}
+          disabled={repos.length === 0}
+          className="mb-2"
+        >
+          {repos.length === 0 ? <option value="">{loadingRepos ? "loading…" : "none"}</option> : null}
           {repos.map((r) => (
-            <option key={r.id} value={r.id}>
+            <option key={r.fullName} value={r.fullName}>
               {r.fullName}
             </option>
           ))}
         </Select>
         <Label htmlFor="sidebar-branch">Base branch</Label>
-        <Select id="sidebar-branch" value={branch} onChange={(e) => setBranch(e.target.value)}>
-          {repo.branches.map((b) => (
-            <option key={b} value={b}>
-              {b}
+        <Select
+          id="sidebar-branch"
+          value={branch}
+          onChange={(e) => setBranch(e.target.value)}
+          disabled={branches.length === 0}
+        >
+          {branches.length === 0 && branch !== "" ? <option value={branch}>{branch}</option> : null}
+          {branches.map((b) => (
+            <option key={b.name} value={b.name}>
+              {b.name}
             </option>
           ))}
         </Select>
-        <p className="mt-2 truncate font-mono text-[11px] text-fg-faint" title={repo.setupScript}>
-          setup: {repo.setupScript}
-        </p>
+        {error ? (
+          <p className="mt-2 text-[11px] leading-4 text-warn">{error}</p>
+        ) : (
+          <p className="mt-2 truncate font-mono text-[11px] text-fg-faint" title={repo?.setupScript ?? undefined}>
+            setup: {repo?.setupScript ?? "none configured"}
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={refreshRepos}
+          className="mt-2 text-[11px] text-fg-faint underline-offset-2 hover:text-fg hover:underline"
+        >
+          Refresh from GitHub
+        </button>
       </div>
 
       <nav className="shrink-0 space-y-0.5 px-2 py-2">
-        <NavLink href="/" icon={icons.tasks} active={pathname === "/"} count={mockTasks.length}>
+        <NavLink href="/" icon={icons.tasks} active={pathname === "/"} count={active.length}>
           Tasks
         </NavLink>
         <NavLink
           href="/archived"
           icon={icons.archived}
           active={pathname.startsWith("/archived")}
-          count={mockArchivedTasks.length}
+          count={archived.length}
         >
           Archived
         </NavLink>
@@ -143,37 +175,44 @@ export function Sidebar() {
 
       <div className="min-h-0 flex-1 overflow-y-auto border-t border-border px-2 py-2">
         <p className="px-2 pb-1.5 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-fg-faint">
-          {repo.fullName.split("/")[1]}
+          {repo ? (repo.fullName.split("/")[1] ?? repo.fullName) : "tasks"}
         </p>
         {repoTasks.length === 0 ? (
           <p className="px-2 py-3 text-[12.5px] text-fg-faint">No tasks in this repo yet.</p>
         ) : (
           <ul className="space-y-0.5">
             {repoTasks.map((task) => {
-              const active = pathname === `/tasks/${task.id}`;
-              const meta = TASK_STATUS_META[task.status];
+              const current = pathname === `/tasks/${task.id}`;
+              const inFlight = task.status === "queued" || task.status === "running";
+              // In flight: say where it is in the queue. Finished: say how the
+              // last run ended, which is the more useful fact by then.
+              const meta = inFlight
+                ? TASK_STATUS_META[task.status]
+                : task.latestRun
+                  ? STATUS_META[task.latestRun.status]
+                  : null;
               return (
                 <li key={task.id}>
                   <Link
                     href={`/tasks/${task.id}`}
-                    aria-current={active ? "page" : undefined}
+                    aria-current={current ? "page" : undefined}
                     className={cn(
                       "block rounded-md px-2 py-1.5 transition-colors",
-                      active ? "bg-surface-3" : "hover:bg-surface-2",
+                      current ? "bg-surface-3" : "hover:bg-surface-2",
                     )}
                   >
                     <span
                       className={cn(
                         "block truncate text-[12.5px] leading-5",
-                        active ? "font-medium text-fg" : "text-fg-muted",
+                        current ? "font-medium text-fg" : "text-fg-muted",
                       )}
                     >
                       {task.title}
                     </span>
                     <span className="mt-0.5 flex items-center gap-1.5">
                       <span className="font-mono text-[10.5px] text-fg-faint">{task.baseBranch}</span>
-                      {task.status !== "idle" ? (
-                        <Badge tone={meta.tone} dot>
+                      {meta ? (
+                        <Badge tone={meta.tone} dot={inFlight}>
                           {meta.label}
                         </Badge>
                       ) : null}
@@ -191,7 +230,7 @@ export function Sidebar() {
           Mock playback
         </NavLink>
         <p className="px-2 pt-1.5 text-[11px] leading-4 text-fg-faint">
-          No backend yet &mdash; every view here is folded from local fixtures.
+          A recorded run, replayed through the same reducer the live socket feeds.
         </p>
       </div>
     </div>

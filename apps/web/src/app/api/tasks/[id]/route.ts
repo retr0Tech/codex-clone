@@ -22,23 +22,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     const task = await getTask(database, id);
     if (!task) return NextResponse.json({ error: "no such task" }, { status: 404 });
 
-    const runs = (await listRuns(database, id)).map((run) => ({
-      id: run.id,
-      prompt: run.prompt,
-      status: run.status,
-      phase: run.phase,
-      stopReason: run.stopReason,
-      turns: run.turns,
-      inputTokens: run.inputTokens,
-      cachedInputTokens: run.cachedInputTokens,
-      outputTokens: run.outputTokens,
-      costUsd: run.costUsd,
-      startedAt: run.startedAt?.toISOString() ?? null,
-      endedAt: run.endedAt?.toISOString() ?? null,
-      createdAt: run.createdAt.toISOString(),
-    }));
-
-    return NextResponse.json({ task, runs });
+    return NextResponse.json({ task, runs: await listRuns(database, id) });
   } catch (error) {
     return NextResponse.json({ error: message(error) }, { status: 500 });
   }

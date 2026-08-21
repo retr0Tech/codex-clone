@@ -4,6 +4,7 @@ import * as schema from "./schema.js";
 
 export * as schema from "./schema.js";
 export * from "./schema.js";
+export * from "./event-log.js";
 
 export type Database = ReturnType<typeof createDb>["db"];
 

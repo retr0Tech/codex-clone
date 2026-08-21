@@ -70,9 +70,27 @@ describe("RunMeter budget enforcement", () => {
     const meter = new RunMeter("run_1", budget, clock().now);
     meter.admit();
     meter.close("wall_clock");
+    assert.equal(meter.closedReason, null, "a bare close carries no explanation of its own");
     const next = meter.admit();
     assert.equal(next.action, "refuse");
     assert.equal(next.action === "refuse" && next.breach, "wall_clock");
+  });
+
+  /**
+   * A cancel and a wall-clock breach close the meter the same way, but they are
+   * not the same event -- and the refusal the agent receives ends up in the
+   * transcript. Telling a user who pressed Cancel that their budget was
+   * exhausted is a small lie in a place people read.
+   */
+  it("carries the closer's own reason, so a cancel does not read as a breach", () => {
+    const meter = new RunMeter("run_1", budget, clock().now);
+    meter.admit();
+    meter.close("wall_clock", "cancelled from the UI");
+    assert.equal(meter.closedReason, "cancelled from the UI");
+    // First reason wins: a later internal close must not overwrite what the
+    // user was told.
+    meter.close("max_cost", "something else");
+    assert.equal(meter.closedReason, "cancelled from the UI");
   });
 
   it("accumulates token counts across turns", () => {

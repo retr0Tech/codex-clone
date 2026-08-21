@@ -7,7 +7,7 @@ import { after, before, describe, it } from "node:test";
 import Docker from "dockerode";
 import { eq } from "drizzle-orm";
 import { DEFAULT_LIMITS } from "@codex-clone/core";
-import { createDb, events, repos, runs, tasks, type Database } from "@codex-clone/db";
+import { appendEvent, createDb, events, readEvents, repos, runs, tasks, type Database } from "@codex-clone/db";
 import { MirrorManager } from "@codex-clone/github";
 import {
   acquireDockerTestLock,
@@ -21,7 +21,6 @@ import { StaticCredentialStore } from "../gateway/credentials.js";
 import { FakeUpstream, upstream } from "../gateway/fake-upstream.js";
 import { GatewayServer } from "../gateway/server.js";
 import { claimNextRun } from "./claim.js";
-import { appendEvent, readEvents } from "./event-log.js";
 import { superviseRun, type SupervisorDeps } from "./supervisor.js";
 import { git } from "./git.js";
 import {
@@ -198,6 +197,11 @@ describe("milestone 5: task -> queue -> container -> event log", { skip: skip ==
    * The queue is global and a developer's database may already hold queued runs
    * from real use; the test must not depend on being alone, and must not
    * swallow someone else's work either.
+   *
+   * It CAN still come back empty-handed, and there is exactly one way that
+   * happens: a real worker is running against the same database and claimed the
+   * run first. That is a true statement about the environment rather than a bug
+   * in the queue, so the assertion below says so.
    */
   async function claimSpecific(runId: string) {
     const parked: Array<{ runId: string; taskId: string }> = [];
@@ -234,7 +238,11 @@ describe("milestone 5: task -> queue -> container -> event log", { skip: skip ==
       // The claim itself is the queue: FOR UPDATE SKIP LOCKED inside a
       // transaction, exactly as a second worker would run it.
       const claimed = await claimSpecific(runId);
-      assert.ok(claimed, "expected the queued run to be claimable");
+      assert.ok(
+        claimed,
+        `run ${runId} was never claimable -- is a worker already running against ${TEST_DATABASE_URL}? ` +
+          `Stop \`pnpm dev\` before running the suite; two workers share one queue by design.`,
+      );
       assert.equal(claimed.runId, runId);
 
       const outcome = await withTimeout(superviseRun(deps, claimed), TEST_TIMEOUT_MS - 10_000, "the run loop");

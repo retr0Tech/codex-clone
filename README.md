@@ -5,12 +5,11 @@ repositories, with scheduled jobs and a settings-managed credential store.
 Local-first, built so agent execution can move to cloud infrastructure without
 rewriting the orchestrator.
 
-> **Status.** The platform layer is complete and tested: credential store,
-> GitHub integration, container sandbox, in-container agent runtime, host model
-> gateway, and the full UI. **The end-to-end loop is not wired yet** — you
-> cannot yet create a task and watch an agent edit a real repository. See
-> [What works today](#what-works-today) for the precise line, and
-> [`PLAN.md`](./PLAN.md) §4 for the remaining milestones.
+> **Status.** The loop is closed: you can pick one of your repositories and a
+> branch, describe a change, and watch the agent work in an isolated container
+> as it happens. What is **not** wired yet is the derived diff view, follow-up
+> turns, and pushing a branch or opening a PR — that is milestone 7. See
+> [What works today](#what-works-today) for the precise line.
 
 ## Requirements
 
@@ -40,12 +39,14 @@ Open <http://localhost:3000>. `APP_ENCRYPTION_KEY` is the only value you must
 fill in; everything else in `.env.example` has a working default. Both the web
 app and the worker read that single root `.env.local`.
 
-To build the agent container image (needed only once the run loop lands, but it
-is what the sandbox tests exercise):
+Build the agent container image before creating a task — every run needs it:
 
 ```bash
 pnpm agent:build    # -> codex-clone/agent:dev
 ```
+
+Then open Settings, paste a GitHub PAT and an OpenAI API key, and you are ready
+to create a task.
 
 ### Verify your setup
 
@@ -53,13 +54,48 @@ pnpm agent:build    # -> codex-clone/agent:dev
 pnpm build && pnpm typecheck && pnpm lint && pnpm test
 ```
 
-Expect **266 tests, 0 failures**, in roughly 10 seconds. Two tests skip unless
+Expect **321 tests, 0 failures**, in roughly 15 seconds. Two tests skip unless
 `ripgrep` is installed on the host (`brew install ripgrep`); it is baked into
-the agent image, so this affects only host-side runs.
+the agent image, so this affects only host-side runs. The Docker- and
+Postgres-dependent suites skip with a reason when either is unavailable, and
+**no test ever reaches a model provider** — every one of them runs against
+`FakeUpstream`, which is the point of having pushed the model call out to the
+host in the first place.
+
+Stop `pnpm dev` before running the suite: the run queue is shared through
+Postgres, so a live worker and the integration tests will compete for the same
+claims.
 
 ## What works today
 
-**You can exercise now:**
+**The main flow works.** Pick a repository and a branch, describe a change,
+press Start task, and you land on the task page while the run is still queued:
+
+```
+POST /api/tasks ──▶ runs(status=queued)
+                         │  FOR UPDATE SKIP LOCKED, at most 3 at a time
+                         ▼
+   mirror ──▶ host clone at base_sha ──▶ tar(uid 10001) ──▶ ws-<taskId>
+                         │
+                         ▼
+                    container ──NDJSON──▶ events(run_id, seq) ──▶ ws://…:8787
+```
+
+A real run against a small repository, streamed live, looks like this — the
+host's own lines first, the container's from seq 64 on the stride:
+
+```
++1.4s  seq     1  status      running
++1.4s  seq     2  phase       setup
++1.7s  seq     4  setup_log   refreshed mirror at ~/.codexclone/mirrors/…
++2.0s  seq     7  setup_log   workspace ready
++2.3s  seq   192  phase       agent
++5.3s  seq   256  tool_call   grep {"pattern":"package.json",…}
++10.9s seq   384  tool_call   apply_patch {"patch":"*** Begin Patch…
++13.3s              (39 token deltas — overlay only, never persisted)
++13.9s seq   512  message     "I added CONTRIBUTING.md at the repository root…"
++13.9s seq   704  status      succeeded
+```
 
 - **Settings** (`/settings`) — save a GitHub PAT and an OpenAI API key. They are
   encrypted with AES-256-GCM before they touch the database, displayed only as a
@@ -67,19 +103,25 @@ the agent image, so this affects only host-side runs.
   each against the live provider.
 - **GitHub integration** — your repositories and their branches, listed from the
   real API and cached in Postgres.
-- **The full UI** — sidebar, task composer, task detail, archived and scheduled
-  views.
-- **`/mock/transcript`** — replays a recorded agent run with realistic
-  streaming: setup phase, reasoning, tool calls, a diff, completion. Also covers
-  cancellation, budget exhaustion, and a failed setup script. This is the
-  clearest picture of the intended experience.
-- **The platform layer, under test** — container sandbox with its isolation
-  properties, the agent runtime, and the model gateway.
+- **The run queue** — tasks queue in Postgres and are claimed with
+  `FOR UPDATE SKIP LOCKED`, at most three containers at a time. Queued work
+  reads as `queued` rather than appearing hung, and a worker restart reconciles
+  against Docker instead of orphaning containers.
+- **The live transcript** — the task page folds history over HTTP, then connects
+  to the worker's WebSocket and resumes from the last seq it holds. Reconnects,
+  reloads and several tabs on one task all work; token deltas stream as an
+  overlay and are discarded the moment the durable message lands.
+- **Cancel** — closes the gateway meter first, so no further model call is
+  admitted even mid-turn, then SIGTERMs with a grace period. Partial work
+  survives, because the workspace volume is the live state.
+- **`/mock/transcript`** — replays a recorded run through the same reducer the
+  socket feeds, including cancellation, budget exhaustion, and a failed setup
+  script. Useful for seeing states a happy run does not produce.
 
-**Not wired yet:** creating a task and watching a real agent work. Every piece
-exists and is tested independently; nothing yet connects a task to a running
-container. That is milestone 5 (queue → clone → run), 6 (live transcript over
-WebSocket), and 7 (diff, push branch, open PR).
+**Not wired yet:** the derived diff (the host running `git diff <baseSha>` after
+each turn), follow-up turns against the warm workspace, and pushing a branch or
+opening a PR. That is milestone 7. The Diff tab renders, but nothing emits a
+`diff` event into it yet.
 
 ## Architecture
 
@@ -112,8 +154,14 @@ the tool list omits `apply_patch` and the workspace mounts read-only, so a
 jailbroken agent still cannot write.
 
 **Live and replayed transcripts are the same data.** A WebSocket frame and a row
-from the history endpoint are the identical `{seq, type, payload}` shape, so one
-client reducer serves both and they cannot drift.
+from `GET /api/tasks/:id/events` are the identical `{seq, type, payload}` shape
+— literally built by the same function in `@codex-clone/db` — so one client
+reducer serves both and they cannot drift. The page proves it on every load: it
+folds history over HTTP, then connects the socket with `after=<lastSeq>` and
+carries on with the same reducer. Token deltas are the single, named exception
+to "everything broadcast is also persisted", and they are dropped the instant
+the durable `message` arrives, so a reload can never resurrect a half-typed
+sentence.
 
 Containers run non-root with all capabilities dropped, `no-new-privileges`, a
 read-only root filesystem, and memory/CPU/pid limits. Full reasoning — including

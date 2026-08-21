@@ -5,6 +5,7 @@ import { asc, desc, eq, ne } from "drizzle-orm";
 import { repos, runs, tasks, type Database } from "@codex-clone/db";
 import { findRepoByFullName, persistRepos } from "@codex-clone/github";
 
+import type { RunView, TaskMode, TaskView } from "../../../lib/types";
 import { githubClient } from "./github";
 
 /**
@@ -22,8 +23,6 @@ import { githubClient } from "./github";
  *     unclaimable. Neither half is a state the worker should ever have to
  *     handle.
  */
-
-export type TaskMode = "ask" | "code";
 
 export interface CreateTaskInput {
   repoFullName: string;
@@ -178,31 +177,7 @@ async function resolveRepo(db: Database, fullName: string) {
   return persisted;
 }
 
-export interface TaskSummary {
-  id: string;
-  title: string;
-  mode: TaskMode;
-  status: "idle" | "queued" | "running" | "archived";
-  repoFullName: string;
-  baseBranch: string;
-  baseSha: string;
-  workBranch: string | null;
-  lastActivityAt: string;
-  createdAt: string;
-  latestRun: {
-    id: string;
-    status: string;
-    phase: string;
-    stopReason: string | null;
-    turns: number;
-    costUsd: number;
-    inputTokens: number;
-    cachedInputTokens: number;
-    outputTokens: number;
-  } | null;
-}
-
-export async function listTasks(db: Database, includeArchived = false): Promise<TaskSummary[]> {
+export async function listTasks(db: Database, includeArchived = false): Promise<TaskView[]> {
   const rows = await db
     .select({ task: tasks, repo: repos })
     .from(tasks)
@@ -213,7 +188,7 @@ export async function listTasks(db: Database, includeArchived = false): Promise<
   return Promise.all(rows.map((row) => withLatestRun(db, row.task, row.repo)));
 }
 
-export async function getTask(db: Database, taskId: string): Promise<TaskSummary | null> {
+export async function getTask(db: Database, taskId: string): Promise<TaskView | null> {
   const [row] = await db
     .select({ task: tasks, repo: repos })
     .from(tasks)
@@ -224,15 +199,16 @@ export async function getTask(db: Database, taskId: string): Promise<TaskSummary
 }
 
 /** Every run of a task, oldest first -- the order the transcript replays in. */
-export async function listRuns(db: Database, taskId: string) {
-  return db.select().from(runs).where(eq(runs.taskId, taskId)).orderBy(asc(runs.createdAt));
+export async function listRuns(db: Database, taskId: string): Promise<RunView[]> {
+  const rows = await db.select().from(runs).where(eq(runs.taskId, taskId)).orderBy(asc(runs.createdAt));
+  return rows.map(toRunView);
 }
 
 async function withLatestRun(
   db: Database,
   task: typeof tasks.$inferSelect,
   repo: typeof repos.$inferSelect,
-): Promise<TaskSummary> {
+): Promise<TaskView> {
   const [run] = await db
     .select()
     .from(runs)
@@ -249,20 +225,28 @@ async function withLatestRun(
     baseBranch: task.baseBranch,
     baseSha: task.baseSha,
     workBranch: task.workBranch,
+    volumeName: task.volumeName,
+    archivedAt: task.archivedAt?.toISOString() ?? null,
     lastActivityAt: task.lastActivityAt.toISOString(),
     createdAt: task.createdAt.toISOString(),
-    latestRun: run
-      ? {
-          id: run.id,
-          status: run.status,
-          phase: run.phase,
-          stopReason: run.stopReason,
-          turns: run.turns,
-          costUsd: run.costUsd,
-          inputTokens: run.inputTokens,
-          cachedInputTokens: run.cachedInputTokens,
-          outputTokens: run.outputTokens,
-        }
-      : null,
+    latestRun: run ? toRunView(run) : null,
+  };
+}
+
+function toRunView(run: typeof runs.$inferSelect): RunView {
+  return {
+    id: run.id,
+    prompt: run.prompt,
+    status: run.status,
+    phase: run.phase,
+    stopReason: run.stopReason,
+    turns: run.turns,
+    inputTokens: run.inputTokens,
+    cachedInputTokens: run.cachedInputTokens,
+    outputTokens: run.outputTokens,
+    costUsd: run.costUsd,
+    startedAt: run.startedAt?.toISOString() ?? null,
+    endedAt: run.endedAt?.toISOString() ?? null,
+    createdAt: run.createdAt.toISOString(),
   };
 }

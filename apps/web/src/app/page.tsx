@@ -2,13 +2,31 @@ import Link from "next/link";
 import { TaskComposer } from "../components/TaskComposer";
 import { TaskList } from "../components/TaskList";
 import { SectionHeading } from "../components/ui/misc";
-import { Badge } from "../components/ui/Badge";
-import { mockScheduledJobs, mockTasks } from "../mocks/data";
+import { listTasks } from "./api/_lib/tasks";
+import { db } from "./api/_lib/settings-store";
+import type { TaskView } from "../lib/types";
 
-export default function Home() {
-  const queued = mockTasks.filter((t) => t.status === "queued" || t.status === "running");
-  const rest = mockTasks.filter((t) => t.status !== "queued" && t.status !== "running");
-  const nextJob = mockScheduledJobs.find((j) => j.enabled);
+/**
+ * Server-rendered from Postgres, so the list is right on first paint rather
+ * than after a client fetch. The sidebar polls the same data for the parts that
+ * change while you are looking at them; this page is the snapshot you arrived
+ * with.
+ */
+export const dynamic = "force-dynamic";
+
+export default async function Home() {
+  let tasks: TaskView[] = [];
+  let problem: string | null = null;
+  try {
+    tasks = await listTasks(db());
+  } catch (error) {
+    // A missing DATABASE_URL or an unmigrated database must render as something
+    // a human can act on, not as a stack trace in the terminal.
+    problem = error instanceof Error ? error.message : String(error);
+  }
+
+  const inFlight = tasks.filter((t) => t.status === "queued" || t.status === "running");
+  const rest = tasks.filter((t) => t.status !== "queued" && t.status !== "running");
 
   return (
     <div className="px-5 py-8 lg:px-8">
@@ -22,18 +40,24 @@ export default function Home() {
 
         <TaskComposer />
 
-        {queued.length > 0 ? (
+        {problem ? (
+          <p className="rounded-xl border border-danger/40 bg-danger-soft px-4 py-3 text-[13px] text-danger">
+            {problem}
+          </p>
+        ) : null}
+
+        {inFlight.length > 0 ? (
           <section>
             <SectionHeading
               aside={
                 <span className="text-[11.5px] text-fg-faint">
-                  Worker runs at most 3 containers; the rest wait in Postgres.
+                  The worker runs at most 3 containers; the rest wait in Postgres.
                 </span>
               }
             >
               In flight
             </SectionHeading>
-            <TaskList tasks={queued} />
+            <TaskList tasks={inFlight} />
           </section>
         ) : null}
 
@@ -47,31 +71,14 @@ export default function Home() {
           >
             Recent tasks
           </SectionHeading>
-          <TaskList tasks={rest} />
+          <TaskList
+            tasks={rest}
+            empty={{
+              title: "No tasks yet",
+              body: "Pick a repository and a branch above, describe a change, and the worker will claim it out of the queue.",
+            }}
+          />
         </section>
-
-        {nextJob ? (
-          <section>
-            <SectionHeading
-              aside={
-                <Link href="/scheduled" className="text-[12px] text-fg-muted hover:text-fg">
-                  All schedules →
-                </Link>
-              }
-            >
-              Next scheduled run
-            </SectionHeading>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-border bg-surface px-4 py-3">
-              <span className="text-[13.5px] font-medium">{nextJob.name}</span>
-              <Badge tone="neutral">{nextJob.cronHuman}</Badge>
-              <span className="font-mono text-[11.5px] text-fg-faint">{nextJob.timezone}</span>
-              <span className="h-px flex-1" />
-              <span className="text-[12.5px] text-fg-muted">
-                {nextJob.autoOpenPr ? "Pushes a branch and opens a PR" : "Pushes a branch"}
-              </span>
-            </div>
-          </section>
-        ) : null}
       </div>
     </div>
   );
