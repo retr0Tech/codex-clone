@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@codex-clone/core": "workspace:*",
+    "@codex-clone/cron": "workspace:*",
     "@codex-clone/db": "workspace:*",
     "@codex-clone/github": "workspace:*",
     "@codex-clone/sandbox-docker": "workspace:*",

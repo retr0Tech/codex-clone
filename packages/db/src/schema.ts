@@ -156,6 +156,13 @@ export const scheduledJobs = pgTable(
       .notNull()
       .references(() => repos.id, { onDelete: "cascade" }),
     prompt: text("prompt").notNull(),
+    /**
+     * The branch every execution starts from. Added in milestone 9: a schedule
+     * has to pin one, or an unattended job silently follows whatever the repo's
+     * default branch happens to be that week. Each execution resolves it to a
+     * fresh SHA at fire time -- that is the point of a schedule.
+     */
+    baseBranch: text("base_branch").notNull().default("main"),
     cronExpr: text("cron_expr").notNull(),
     timezone: text("timezone").notNull().default("UTC"),
     enabled: boolean("enabled").notNull().default(true),
