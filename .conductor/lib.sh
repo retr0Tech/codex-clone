@@ -159,6 +159,14 @@ port_registry() {
   printf '%s/ports\n' "$(state_root)"
 }
 
+# Never handed to a workspace.
+#
+# A plain `pnpm dev` from an ordinary checkout takes 3000 and 8787
+# unconditionally -- they are the documented defaults and it knows nothing
+# about reservations. Lending one to a workspace would break the README's very
+# first instruction for the developer who is not using Conductor at all.
+RESERVED_DEFAULT_PORTS=" 3000 8787 "
+
 # Allocate a TCP port to this workspace, and REMEMBER that we did.
 #
 #   reserve_port <role> <preferred-or-empty> <range-start> <range-end>
@@ -187,6 +195,7 @@ reserve_port() {
   done
 
   for port in ${candidates}; do
+    case "${RESERVED_DEFAULT_PORTS}" in *" ${port} "*) continue ;; esac
     dir="${registry}/${port}"
     owner_file="${dir}/owner"
 
