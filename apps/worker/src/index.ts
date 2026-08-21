@@ -5,7 +5,7 @@ import { join } from "node:path";
 import Docker from "dockerode";
 import { createDb } from "@codex-clone/db";
 import { redact } from "@codex-clone/core";
-import { MirrorManager } from "@codex-clone/github";
+import { GitHubClient, MirrorManager, createOctokit } from "@codex-clone/github";
 import { DockerSandbox } from "@codex-clone/sandbox-docker";
 import { config } from "./config.js";
 import { EncryptedCredentialStore } from "./credentials.js";
@@ -17,6 +17,7 @@ import { PublishError, publishTask } from "./runner/publish.js";
 import { RunQueue } from "./runner/queue.js";
 import { recordUsage } from "./runner/run-state.js";
 import type { SupervisorDeps } from "./runner/supervisor.js";
+import { NoSuchJobError, RunNowError, Scheduler } from "./scheduler/index.js";
 import { FsSnapshotStore } from "./snapshots/index.js";
 
 /**
@@ -65,6 +66,10 @@ async function main(): Promise<void> {
   // precisely so cancel can ride it, but the thing that does the stopping is
   // the queue, which owns the run's controller and its container handle.
   let cancelRun: (runId: string) => Promise<boolean> = () => Promise.resolve(false);
+  // Same forward reference, for the same reason: "run now" has to reach the
+  // scheduler, and the scheduler is built after the hub that routes to it.
+  let runJobNow: (jobId: string) => Promise<{ taskId: string; workBranch: string }> = () =>
+    Promise.reject(new Error("the scheduler is not running yet"));
   const docker = new Docker({ socketPath: config.dockerSocket });
   // Milestone 8: the cold tier. Local filesystem today; the SnapshotStore
   // interface is stream-in / stream-out so S3 drops straight in.
@@ -129,6 +134,23 @@ async function main(): Promise<void> {
       // Milestone 8: archive, restore, and the explicit rebase. Same reasoning
       // as publish -- each one needs the workspace volume.
       ...archiveRoutes(reaperDeps),
+      // Milestone 9: "Run now". It lives here rather than in the web app so
+      // that a manual run takes the identical fire path a scheduled one does --
+      // fresh task, fresh workspace, same execution row.
+      "POST /control/schedule/run": async (body) => {
+        const input = body as { jobId?: unknown };
+        if (typeof input.jobId !== "string" || input.jobId === "") {
+          return { status: 400, body: { error: "jobId is required" } };
+        }
+        try {
+          return { status: 202, body: await runJobNow(input.jobId) };
+        } catch (error) {
+          const message = redact(error instanceof Error ? error.message : String(error));
+          console.warn(`[worker] run-now failed: ${message}`);
+          const status = error instanceof NoSuchJobError ? 404 : error instanceof RunNowError ? 409 : 500;
+          return { status, body: { error: message } };
+        }
+      },
     },
   });
 
@@ -198,13 +220,35 @@ async function main(): Promise<void> {
   reaper.start();
   console.log(`[worker] idle reaper sweeping every ${config.reaperPollMs}ms, TTL ${config.idleReapMs}ms`);
 
-  // Milestone 9: scheduler tick every config.schedulerTickMs.
+  // Milestone 9: the scheduler tick. It writes ordinary queued runs, so the
+  // queue above executes them through the same supervisor as everything else,
+  // and it settles finished occurrences through the same publish path.
+  const scheduler = new Scheduler({
+    deps: {
+      db,
+      resolveBaseSha: async (repo, branch) => {
+        const token = await credentials.getGithubToken();
+        if (!token) throw new Error("no GitHub token is configured; add one on the Settings page");
+        return new GitHubClient(createOctokit(token)).resolveRefSha(repo.owner, repo.name, branch);
+      },
+      publish: (taskId, options) => publishTask(publishDeps, taskId, options),
+      log: (message) => console.log(redact(message)),
+    },
+    tickMs: config.schedulerTickMs,
+  });
+  runJobNow = async (jobId) => {
+    const fired = await scheduler.runNow(jobId);
+    return { taskId: fired.taskId, workBranch: fired.workBranch };
+  };
+  scheduler.start();
+  console.log(`[worker] scheduler ticking every ${Math.round(config.schedulerTickMs / 1000)}s`);
 
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[worker] ${signal} received, shutting down`);
+    await scheduler.stop();
     await queue.stop();
     // Waits for a sweep in flight: a shutdown between the snapshot and the
     // volume removal would leave a workspace half-reaped.
