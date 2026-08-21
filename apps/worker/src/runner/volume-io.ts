@@ -96,9 +96,10 @@ export async function uploadDirectory(
   docker: Docker,
   volumeName: string,
   sourceDir: string,
-  opts: HelperOptions,
+  opts: HelperOptions & { targetPath?: string },
 ): Promise<void> {
   const flags = await ownershipFlags();
+  const target = opts.targetPath ?? WORKSPACE_PATH;
 
   await withMountedVolume(docker, volumeName, opts, async (container) => {
     const tar = spawn("tar", ["-C", sourceDir, ...flags, "--numeric-owner", "-cf", "-", "."], {
@@ -120,7 +121,7 @@ export async function uploadDirectory(
 
     try {
       await withTimeout(
-        Promise.all([container.putArchive(tar.stdout, { path: WORKSPACE_PATH }), exited]),
+        Promise.all([container.putArchive(tar.stdout, { path: target }), exited]),
         opts.timeoutMs ?? DEFAULT_ARCHIVE_TIMEOUT_MS,
         `uploading ${sourceDir} into volume ${volumeName}`,
       );

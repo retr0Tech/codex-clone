@@ -39,6 +39,26 @@ export interface IssueComment {
   body: string;
 }
 
+export interface PullRequestSummary {
+  number: number;
+  url: string;
+  state: string;
+  title: string;
+  head: string;
+  base: string;
+  /** True when this call opened it rather than finding one already open. */
+  created: boolean;
+}
+
+export interface OpenPullRequestInput {
+  title: string;
+  /** The work branch. Always a branch WE pushed, never one the agent named. */
+  head: string;
+  base: string;
+  body?: string;
+  draft?: boolean;
+}
+
 export interface IssueContext {
   number: number;
   /** GitHub models a PR as an issue; this says which one it actually is. */
@@ -133,6 +153,50 @@ export class GitHubClient {
   async getRepository(owner: string, repo: string): Promise<RepoSummary> {
     const { data } = await this.#kit.request<RawRepo>("GET /repos/{owner}/{repo}", { owner, repo });
     return toRepoSummary(data);
+  }
+
+  /**
+   * The open pull request for a branch, if there already is one.
+   *
+   * `POST /pulls` answers a duplicate with a 422 whose message has to be
+   * pattern-matched to be understood, so the existence check is done first and
+   * explicitly. Pressing "Open PR" twice should show you the pull request, not
+   * an error about it.
+   */
+  async findOpenPullRequest(owner: string, repo: string, head: string): Promise<PullRequestSummary | null> {
+    const { data } = await this.#kit.request<RawPull[]>("GET /repos/{owner}/{repo}/pulls", {
+      owner,
+      repo,
+      // GitHub wants the head qualified by owner; an unqualified branch name
+      // silently matches nothing.
+      head: `${owner}:${head}`,
+      state: "open",
+      per_page: 1,
+    });
+    const pull = Array.isArray(data) ? data[0] : undefined;
+    return pull ? toPullSummary(pull, false) : null;
+  }
+
+  /**
+   * Opens a pull request for a branch the host has already pushed.
+   *
+   * Idempotent by design: an existing open PR for the same head is returned
+   * rather than duplicated, so this is safe to retry and safe to double-click.
+   */
+  async openPullRequest(owner: string, repo: string, input: OpenPullRequestInput): Promise<PullRequestSummary> {
+    const existing = await this.findOpenPullRequest(owner, repo, input.head);
+    if (existing) return existing;
+
+    const { data } = await this.#kit.request<RawPull>("POST /repos/{owner}/{repo}/pulls", {
+      owner,
+      repo,
+      title: input.title,
+      head: input.head,
+      base: input.base,
+      ...(input.body === undefined ? {} : { body: input.body }),
+      ...(input.draft === undefined ? {} : { draft: input.draft }),
+    });
+    return toPullSummary(data, true);
   }
 
   /**
@@ -238,6 +302,27 @@ interface RawIssue {
 interface RawComment {
   body?: string | null;
   user?: { login: string } | null;
+}
+
+interface RawPull {
+  number: number;
+  html_url: string;
+  state: string;
+  title: string;
+  head?: { ref?: string } | null;
+  base?: { ref?: string } | null;
+}
+
+function toPullSummary(pull: RawPull, created: boolean): PullRequestSummary {
+  return {
+    number: pull.number,
+    url: pull.html_url,
+    state: pull.state,
+    title: pull.title,
+    head: pull.head?.ref ?? "",
+    base: pull.base?.ref ?? "",
+    created,
+  };
 }
 
 function toRepoSummary(repo: RawRepo): RepoSummary {

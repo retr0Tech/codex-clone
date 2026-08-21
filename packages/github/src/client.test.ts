@@ -283,3 +283,83 @@ describe("formatIssueContext", () => {
     assert.ok(!text.includes("Labels:"));
   });
 });
+
+/**
+ * Opening a pull request is the last step of the slice, and the one a user is
+ * most likely to trigger twice -- once because they meant to, once because the
+ * first click did not obviously do anything. GitHub answers a duplicate with a
+ * 422 whose message would have to be pattern-matched to be understood, so the
+ * existence check is explicit and comes first.
+ */
+describe("GitHubClient.openPullRequest", () => {
+  const created = {
+    number: 12,
+    html_url: "https://github.com/acme/app/pull/12",
+    state: "open",
+    title: "Add CONTRIBUTING.md",
+    head: { ref: "codex/add-contributing-abc123" },
+    base: { ref: "main" },
+  };
+
+  it("opens one when the branch has none, and qualifies the head with the owner", async () => {
+    const kit = fakeOctokit({
+      request: {
+        "GET /repos/{owner}/{repo}/pulls": [],
+        "POST /repos/{owner}/{repo}/pulls": created,
+      },
+    });
+
+    const pull = await new GitHubClient(kit).openPullRequest("acme", "app", {
+      title: "Add CONTRIBUTING.md",
+      head: "codex/add-contributing-abc123",
+      base: "main",
+      body: "derived by the host",
+    });
+
+    assert.deepEqual(pull, {
+      number: 12,
+      url: "https://github.com/acme/app/pull/12",
+      state: "open",
+      title: "Add CONTRIBUTING.md",
+      head: "codex/add-contributing-abc123",
+      base: "main",
+      created: true,
+    });
+
+    const lookup = kit.calls.find((c) => c.route === "GET /repos/{owner}/{repo}/pulls");
+    // An unqualified branch name silently matches nothing on this endpoint.
+    assert.equal(lookup?.params["head"], "acme:codex/add-contributing-abc123");
+    assert.equal(lookup?.params["state"], "open");
+  });
+
+  it("returns the existing pull request instead of duplicating it", async () => {
+    const kit = fakeOctokit({ request: { "GET /repos/{owner}/{repo}/pulls": [created] } });
+
+    const pull = await new GitHubClient(kit).openPullRequest("acme", "app", {
+      title: "ignored",
+      head: "codex/add-contributing-abc123",
+      base: "main",
+    });
+
+    assert.equal(pull.number, 12);
+    assert.equal(pull.created, false, "we found it, we did not create it");
+    // The POST is never reached; the fake would have thrown for it anyway.
+    assert.equal(kit.calls.filter((c) => c.route.startsWith("POST")).length, 0);
+  });
+
+  it("omits body and draft rather than sending undefined", async () => {
+    const kit = fakeOctokit({
+      request: { "GET /repos/{owner}/{repo}/pulls": [], "POST /repos/{owner}/{repo}/pulls": created },
+    });
+    await new GitHubClient(kit).openPullRequest("acme", "app", { title: "t", head: "h", base: "main" });
+
+    const post = kit.calls.find((c) => c.route === "POST /repos/{owner}/{repo}/pulls");
+    assert.equal("body" in (post?.params ?? {}), false);
+    assert.equal("draft" in (post?.params ?? {}), false);
+  });
+
+  it("reports no open pull request as null", async () => {
+    const kit = fakeOctokit({ request: { "GET /repos/{owner}/{repo}/pulls": [] } });
+    assert.equal(await new GitHubClient(kit).findOpenPullRequest("acme", "app", "nope"), null);
+  });
+});

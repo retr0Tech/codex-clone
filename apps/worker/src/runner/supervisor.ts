@@ -17,7 +17,7 @@ import {
   toRow,
   type Database,
 } from "@codex-clone/db";
-import type { MirrorManager } from "@codex-clone/github";
+import { recordMirror, type MirrorManager } from "@codex-clone/github";
 import type { DockerSandboxSpec } from "@codex-clone/sandbox-docker";
 import { workspaceVolumeName } from "@codex-clone/sandbox-docker";
 import type { MeterRegistry } from "../gateway/metering.js";
@@ -30,6 +30,7 @@ import {
   type TaskContext,
 } from "./run-state.js";
 import { SeqAllocator, runBase } from "./seq.js";
+import { DiffTrigger, deriveDiff } from "./diff.js";
 import { prepareWorkspace, workBranchName } from "./workspace.js";
 
 /**
@@ -163,10 +164,36 @@ export async function superviseRun(
   let handle: SandboxHandle | null = options.adopt ?? null;
   let agentStatus: { status: RunStatus; reason: string | null } | null = null;
   let failure: string | null = null;
+  const diffs = new DiffTrigger();
 
   try {
     const task = await loadTaskContext(db, taskId);
     if (!task) throw new Error(`task ${taskId} disappeared between claim and start`);
+
+    /**
+     * Derives the diff and emits it into the gap after the last agent event.
+     *
+     * Failing to derive one must not fail the run: the agent's work is in the
+     * volume either way, and a diff nobody could compute is a worse reason to
+     * throw away a transcript than it is to log.
+     */
+    const emitDiff = async (): Promise<void> => {
+      diffs.markDerived();
+      const volumeName = task.volumeName ?? workspaceVolumeName(task.taskId);
+      try {
+        const payload = await deriveDiff({
+          docker: deps.docker,
+          volumeName,
+          baseSha: task.baseSha,
+          image: deps.config.image,
+          dataDir: deps.config.dataDir,
+          taskId: task.taskId,
+        });
+        await emit("diff", payload);
+      } catch (error) {
+        log(`[run ${runId.slice(0, 8)}] could not derive the diff: ${redact(String(error))}`);
+      }
+    };
 
     await emit("status", { status: "running" });
 
@@ -194,6 +221,14 @@ export async function superviseRun(
         continue;
       }
 
+      // A turn that changed the workspace has just ended: derive the diff BEFORE
+      // ingesting this event, so it lands in the gap after the last tool result
+      // rather than after the thing that opened the next turn. Ask mode never
+      // writes, so it never pays for an extraction.
+      if (task.mode === "code" && diffs.shouldDeriveBefore(event.type, event.payload)) {
+        await emitDiff();
+      }
+
       const row = { ...event, runId, taskId, seq: alloc.ingest(event.seq) } as AnyEventRow;
       if (await appendEvent(db, row)) deps.publish?.(row);
 
@@ -202,6 +237,11 @@ export async function superviseRun(
         agentStatus = { status: row.payload.status, reason: row.payload.reason ?? null };
       }
     }
+
+    // The stream can end mid-turn -- a cancel, a container that died, a budget
+    // wind-down -- leaving work that no boundary event ever announced. Partial
+    // work is still work, and it is still in the volume.
+    if (task.mode === "code" && diffs.dirty) await emitDiff();
   } catch (error) {
     failure = redact(error instanceof Error ? error.message : String(error));
     log(`[run ${runId.slice(0, 8)}] failed: ${failure}`);
@@ -227,7 +267,7 @@ async function start(
   const workBranch = task.workBranch ?? workBranchName(task.title, task.taskId);
 
   const token = await deps.githubToken();
-  await prepareWorkspace(
+  const prepared = await prepareWorkspace(
     {
       taskId: task.taskId,
       volumeName,
@@ -255,6 +295,17 @@ async function start(
     task.volumeName !== null,
   );
   await recordVolume(deps.db, task.taskId, volumeName, workBranch);
+
+  // Records where the mirror is and when it was last fetched. That timestamp is
+  // also the repo picker's "you were working here recently" signal -- without
+  // this write every repo looks equally untouched and the picker opens on
+  // whichever one sorts first alphabetically.
+  await recordMirror(deps.db, task.repo.fullName, {
+    mirrorPath: prepared.mirrorPath,
+    mirrorFetchedAt: prepared.mirrorFetchedAt,
+  }).catch((error: unknown) => {
+    log(`[task ${task.taskId.slice(0, 8)}] could not record the mirror: ${redact(String(error))}`);
+  });
 
   const setupScript = task.repo.setupScript ?? undefined;
   const spec: DockerSandboxSpec = {

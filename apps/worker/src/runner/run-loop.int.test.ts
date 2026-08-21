@@ -8,7 +8,7 @@ import Docker from "dockerode";
 import { eq } from "drizzle-orm";
 import { DEFAULT_LIMITS } from "@codex-clone/core";
 import { appendEvent, createDb, events, readEvents, repos, runs, tasks, type Database } from "@codex-clone/db";
-import { MirrorManager } from "@codex-clone/github";
+import { MirrorManager, listPersistedRepos } from "@codex-clone/github";
 import {
   acquireDockerTestLock,
   DockerSandbox,
@@ -22,6 +22,7 @@ import { FakeUpstream, upstream } from "../gateway/fake-upstream.js";
 import { GatewayServer } from "../gateway/server.js";
 import { claimNextRun } from "./claim.js";
 import { superviseRun, type SupervisorDeps } from "./supervisor.js";
+import { PublishError, publishTask } from "./publish.js";
 import { git } from "./git.js";
 import {
   TEST_DATABASE_URL,
@@ -57,7 +58,10 @@ const FAKE_KEY = "sk-test-not-a-real-key-000000000000";
 
 const skip = (await dockerUnavailable()) || (await postgresUnavailable());
 
-describe("milestone 5: task -> queue -> container -> event log", { skip: skip === false ? undefined : skip }, () => {
+describe(
+  "the vertical slice: queue -> container -> event log -> derived diff -> pushed branch",
+  { skip: skip === false ? undefined : skip },
+  () => {
   let docker: Docker;
   let db: Database;
   let closeDb: () => Promise<unknown>;
@@ -223,7 +227,7 @@ describe("milestone 5: task -> queue -> container -> event log", { skip: skip ==
     "claims a queued run, seeds the workspace, and streams a real agent turn into the event log",
     { timeout: TEST_TIMEOUT_MS },
     async () => {
-      const { taskId, runId } = await seedTask("add a CONTRIBUTING file");
+      const { taskId, runId, repoId } = await seedTask("add a CONTRIBUTING file");
       const { deps, gateway, fake } = makeDeps([
         [
           upstream.toolCall("call_1", "apply_patch", {
@@ -267,6 +271,36 @@ describe("milestone 5: task -> queue -> container -> event log", { skip: skip ==
       const toolResult = rows.find((r) => r.type === "tool_result");
       assert.equal((toolResult?.payload as { ok: boolean }).ok, true);
 
+      /**
+       * The diff is DERIVED. Nothing in the scripted turns above told the host
+       * what changed -- it extracted the volume and ran `git diff` against the
+       * pinned SHA, so this is the workspace's own account of itself.
+       */
+      const diff = rows.find((r) => r.type === "diff");
+      assert.ok(diff, `expected a derived diff; saw ${types.join(", ")}`);
+      const payload = diff.payload as {
+        baseSha: string;
+        files: Array<{ path: string; status: string; additions: number; deletions: number }>;
+        patch: string;
+        truncated: boolean;
+      };
+      assert.equal(payload.baseSha, baseSha, "the diff is measured against the pin, not against HEAD");
+      assert.deepEqual(payload.files, [
+        { path: "CONTRIBUTING.md", status: "added", additions: 1, deletions: 0 },
+      ]);
+      assert.match(payload.patch, /^diff --git a\/CONTRIBUTING\.md/m);
+      assert.match(payload.patch, /\+Run the tests with/);
+      assert.equal(payload.truncated, false);
+
+      // It sits in the gap reserved for the host, between the tool result that
+      // made the change and the message that ended the turn.
+      const resultSeq = toolResult?.seq ?? 0;
+      const messageSeq = rows.find((r) => r.type === "message")?.seq ?? 0;
+      assert.ok(diff.seq > resultSeq && diff.seq < messageSeq, `diff at ${diff.seq} should sit in (${resultSeq}, ${messageSeq})`);
+
+      // Exactly one: a turn that wrote three times still produces one diff.
+      assert.equal(rows.filter((r) => r.type === "diff").length, 1);
+
       // Deltas are ephemeral: nothing of the kind reaches the durable log.
       assert.equal(types.includes("delta" as never), false);
       // ...and the key the host attached is nowhere in it either.
@@ -282,6 +316,22 @@ describe("milestone 5: task -> queue -> container -> event log", { skip: skip ==
       assert.equal(run?.outputTokens, 110);
       assert.ok((run?.costUsd ?? 0) > 0, "cost should have been recorded by the gateway meter");
       assert.ok(run?.endedAt, "endedAt must be set so the run does not look in-flight");
+
+      /**
+       * The mirror is recorded, and that timestamp is what the repo picker
+       * sorts on. Without this write every repository looks equally untouched
+       * and the picker opens on whichever one happens to sort first
+       * alphabetically -- which is how it came to preselect a repo the user had
+       * never worked in.
+       */
+      const [repoRow] = await db.select().from(repos).where(eq(repos.id, repoId));
+      assert.ok(repoRow?.mirrorFetchedAt, "the run should have recorded when it fetched the mirror");
+      assert.ok(repoRow?.mirrorPath?.endsWith(".git"), `mirrorPath: ${repoRow?.mirrorPath}`);
+
+      // ...and it therefore sorts above every repository that has none, even
+      // though Postgres puts NULLs first on a descending sort by default.
+      const ordered = await listPersistedRepos(db);
+      assert.equal(ordered[0]?.id, repoId, `expected the freshly mirrored repo first, got ${ordered[0]?.fullName}`);
 
       const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId));
       assert.equal(task?.status, "idle");
@@ -299,6 +349,54 @@ describe("milestone 5: task -> queue -> container -> event log", { skip: skip ==
         "git -C /workspace -c safe.directory=/workspace rev-parse --abbrev-ref HEAD",
       );
       assert.match(branch, /^codex\//);
+
+      /**
+       * Publishing, against the same fixture origin. No model is involved --
+       * the work already exists in the volume -- so this exercises the real
+       * commit-and-push path for free.
+       */
+      const publishDeps = {
+        db,
+        docker,
+        githubToken: () => Promise.resolve(null),
+        config: { image: TEST_IMAGE, dataDir },
+        remoteUrl: () => originPath,
+      };
+
+      const first = await withTimeout(publishTask(publishDeps, taskId), 120_000, "the first push");
+      assert.equal(first.filesChanged, 1);
+      assert.ok(first.commit);
+      assert.equal(first.pullRequest, null, "no pull request was asked for");
+
+      // The branch is really on the origin, and it really carries the file.
+      const remoteSha = (await git(["--git-dir", originPath, "rev-parse", `refs/heads/${first.branch}`])).trim();
+      assert.equal(remoteSha, first.commit);
+      const remoteTree = await git(["--git-dir", originPath, "ls-tree", "--name-only", remoteSha]);
+      assert.ok(remoteTree.split("\n").includes("CONTRIBUTING.md"), `origin tree: ${remoteTree}`);
+
+      /**
+       * The commit was made in an EXTRACTED COPY, so unless `.git` was written
+       * back into the volume the workspace would still believe it was sitting
+       * at the base commit -- and this second push would build a different
+       * commit from the same parent and diverge from the branch already on the
+       * origin.
+       *
+       * Getting the identical SHA back is therefore the assertion that the
+       * write-back worked: nothing else could produce it.
+       */
+      const second = await withTimeout(publishTask(publishDeps, taskId), 120_000, "the second push");
+      assert.equal(second.filesChanged, 0, "there was nothing new to commit");
+      assert.equal(second.commit, first.commit, "the volume must have kept the commit; otherwise this diverges");
+
+      const unchanged = (await git(["--git-dir", originPath, "rev-parse", `refs/heads/${first.branch}`])).trim();
+      assert.equal(unchanged, remoteSha, "the origin must not have moved");
+
+      // And a task that has never run cannot be published at all.
+      const bare = await seedTask("never run");
+      await assert.rejects(
+        () => publishTask(publishDeps, bare.taskId),
+        (error: unknown) => error instanceof PublishError && /no workspace yet/.test((error as Error).message),
+      );
     },
   );
 
@@ -375,7 +473,7 @@ async function runInVolume(docker: Docker, volumeName: string, command: string):
       NetworkMode: "none",
       AutoRemove: false,
     },
-  });
+    });
   try {
     await container.start();
     await withTimeout(container.wait(), 60_000, `command in volume ${volumeName}`);

@@ -50,6 +50,20 @@ export class RunQueue {
   }
 
   /**
+   * Whether this worker is currently running something for a task.
+   *
+   * Used to refuse a publish mid-run: committing rewrites `.git` inside the
+   * workspace volume, and doing that under a live agent would race the process
+   * writing the working tree.
+   */
+  isRunning(taskId: string): boolean {
+    for (const active of this.#active.values()) {
+      if (active.taskId === taskId) return true;
+    }
+    return false;
+  }
+
+  /**
    * Boot reconciliation (PLAN.md §7, risk 5).
    *
    * Docker is the authority on what is running, not our memory of it. Three
