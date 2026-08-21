@@ -39,6 +39,12 @@ fi
 echo "conductor: installing dependencies"
 pnpm install --frozen-lockfile
 
+# The workspace packages are consumed as their compiled `dist/`, and a worktree
+# is a checkout that has never been built. Without this the worker cannot even
+# resolve @codex-clone/db.
+echo "conductor: building workspace packages"
+pnpm -r --filter "./packages/*" build
+
 # --- 2. ports ---------------------------------------------------------------
 #
 # Reuse what a previous run of this script already recorded, so re-running
