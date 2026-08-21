@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import type { AgentJobSpec } from "@codex-clone/sandbox-docker";
+import type { AgentJobSpec } from "@codex-clone/core";
 
 /**
  * The job spec arrives as a file bind-mounted into the sandbox (or on stdin).

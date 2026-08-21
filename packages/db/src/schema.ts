@@ -103,6 +103,8 @@ export const runs = pgTable(
     stopReason: text("stop_reason"),
     turns: integer("turns").notNull().default(0),
     inputTokens: integer("input_tokens").notNull().default(0),
+    /** Subset of inputTokens served from the prompt cache; reported by the gateway. */
+    cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
     costUsd: doublePrecision("cost_usd").notNull().default(0),
     /** Set when a scheduled job spawned this run. */

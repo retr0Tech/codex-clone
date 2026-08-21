@@ -52,8 +52,3 @@ export function redactDeep<T>(value: T): T {
   return value;
 }
 
-/** Display form for the UI. Never send a full credential to the browser. */
-export function maskSecret(value: string): string {
-  if (value.length <= 8) return "••••••••";
-  return `${value.slice(0, 4)}${"•".repeat(8)}${value.slice(-4)}`;
-}
