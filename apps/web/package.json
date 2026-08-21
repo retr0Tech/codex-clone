@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000",
+    "dev": "next dev -p ${WEB_PORT:-3000}",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p ${WEB_PORT:-3000}",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "lint": "eslint"

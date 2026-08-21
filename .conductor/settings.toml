@@ -1,0 +1,18 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+# https://www.conductor.build/docs/reference/scripts
+#
+# setup   runs once when Conductor creates the workspace (and on demand after).
+# run     starts this workspace's web app and worker on ITS ports.
+# archive runs before Conductor deletes the workspace directory.
+#
+# run_mode = "concurrent" is the whole point of the exercise: several
+# workspaces have to be able to run at the same time. They can, because setup
+# gives each one its own database, ports, host data directory and gateway
+# socket. See README.md, "Working on several changes at once".
+
+[scripts]
+setup = "./.conductor/setup.sh"
+run = "./.conductor/run.sh"
+archive = "./.conductor/archive.sh"
+run_mode = "concurrent"

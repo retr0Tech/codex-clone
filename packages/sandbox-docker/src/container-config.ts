@@ -1,6 +1,16 @@
 import type Docker from "dockerode";
 import type { SandboxSpec } from "@codex-clone/core";
-import { LABEL_KIND, LABEL_MANAGED, LABEL_MODE, LABEL_RUN_ID, LABEL_SANDBOX_ID, LABEL_TASK_ID, MANAGED_VALUE } from "./labels.js";
+import {
+  DEFAULT_WORKSPACE_ID,
+  LABEL_KIND,
+  LABEL_MANAGED,
+  LABEL_MODE,
+  LABEL_RUN_ID,
+  LABEL_SANDBOX_ID,
+  LABEL_TASK_ID,
+  LABEL_WORKSPACE,
+  MANAGED_VALUE,
+} from "./labels.js";
 
 /**
  * Every isolation decision for a sandbox, in one pure function.
@@ -54,10 +64,13 @@ export interface ContainerConfigInput {
   jobSpecHostPath: string;
   /** Diagnostic hook only. Production callers never set this; the image entrypoint is the agent. */
   overrideCommand?: string[];
+  /** Which checkout owns this container. See LABEL_WORKSPACE. */
+  workspaceId?: string;
 }
 
 export function buildContainerConfig(input: ContainerConfigInput): Docker.ContainerCreateOptions {
   const { spec, sandboxId, containerName, jobSpecHostPath, overrideCommand } = input;
+  const workspaceId = input.workspaceId ?? DEFAULT_WORKSPACE_ID;
   assertNoSecretsInEnv(spec.env);
 
   // ASK MODE IS STRUCTURAL. The read-only bit lives here, on the mount, not in
@@ -111,6 +124,7 @@ export function buildContainerConfig(input: ContainerConfigInput): Docker.Contai
       [LABEL_TASK_ID]: spec.taskId,
       [LABEL_RUN_ID]: spec.runId,
       [LABEL_MODE]: spec.mode,
+      [LABEL_WORKSPACE]: workspaceId,
     },
     // No TTY: we need a demultiplexed stream so stdout (the NDJSON event
     // channel) never interleaves with stderr diagnostics.

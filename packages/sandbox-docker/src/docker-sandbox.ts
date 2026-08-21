@@ -17,7 +17,7 @@ import {
 import type { AgentJobSpec } from "./job-spec.js";
 import { DEFAULT_MAX_TOOL_OUTPUT_BYTES } from "./job-spec.js";
 import { FrameDemuxer } from "./demux.js";
-import { LABEL_RUN_ID, LABEL_SANDBOX_ID, LABEL_TASK_ID, managedFilter } from "./labels.js";
+import { DEFAULT_WORKSPACE_ID, LABEL_RUN_ID, LABEL_SANDBOX_ID, LABEL_TASK_ID, managedFilter } from "./labels.js";
 import { NdjsonEventParser } from "./ndjson.js";
 import { ensureVolume, isNotFound, VOLUME_KIND_CACHE, VOLUME_KIND_WORKSPACE } from "./volumes.js";
 
@@ -67,6 +67,15 @@ export interface DockerSandboxOptions {
   startAttempts?: number;
   /** Container stderr is diagnostics, not transcript. Route it at the logging boundary. */
   onStderr?: (line: string, handle: SandboxHandle) => void;
+  /**
+   * Which checkout owns the containers and volumes this provider creates.
+   *
+   * `list()` -- and therefore boot reconciliation, which destroys every
+   * managed sandbox no live run claims -- is scoped to it, so two workers
+   * sharing one Docker daemon cannot tear down each other's containers.
+   * Defaults to `default`, which is every single-workspace checkout.
+   */
+  workspaceId?: string;
 }
 
 export class ImageNotFoundError extends Error {
@@ -117,9 +126,11 @@ export class SandboxStartError extends Error {
 
 export class DockerSandbox implements SandboxProvider {
   readonly docker: Docker;
+  readonly workspaceId: string;
 
   constructor(private readonly options: DockerSandboxOptions) {
     this.docker = new Docker({ socketPath: options.socketPath });
+    this.workspaceId = options.workspaceId ?? DEFAULT_WORKSPACE_ID;
   }
 
   async create(spec: SandboxSpec): Promise<SandboxHandle> {
@@ -133,8 +144,15 @@ export class DockerSandbox implements SandboxProvider {
 
     // The volume is the hot tier and may already hold a cloned workspace from
     // a previous turn; createVolume is idempotent, so this is "ensure".
-    await ensureVolume(this.docker, spec.volumeName, { kind: VOLUME_KIND_WORKSPACE, taskId: spec.taskId });
+    await ensureVolume(this.docker, spec.volumeName, {
+      kind: VOLUME_KIND_WORKSPACE,
+      taskId: spec.taskId,
+      workspaceId: this.workspaceId,
+    });
     if (spec.cacheVolumeName) {
+      // Deliberately NOT workspace-scoped: the package-manager cache is shared
+      // on purpose (PLAN.md §3.7), and a per-workspace copy would multiply the
+      // disk cost of the thing whose entire job is to avoid repeated downloads.
       await ensureVolume(this.docker, spec.cacheVolumeName, { kind: VOLUME_KIND_CACHE });
     }
 
@@ -156,6 +174,7 @@ export class DockerSandbox implements SandboxProvider {
             // a failed start still owns its name until it is removed.
             containerName: `codex-sbx-${sandboxId.slice(0, 12)}${attempt > 1 ? `-r${attempt}` : ""}`,
             jobSpecHostPath,
+            workspaceId: this.workspaceId,
             ...(full.overrideCommand ? { overrideCommand: full.overrideCommand } : {}),
           }),
         );
@@ -368,10 +387,18 @@ export class DockerSandbox implements SandboxProvider {
   }
 
   /** Worker-boot reconciliation: which sandboxes did we leave running? */
+  /**
+   * Live sandboxes belonging to THIS workspace.
+   *
+   * The workspace scope is load-bearing rather than cosmetic: the caller
+   * (RunQueue.reconcile) destroys every sandbox it sees that no run in its own
+   * database claims, so an unscoped list would make a second worker's
+   * containers look like orphans.
+   */
   async list(): Promise<SandboxHandle[]> {
     const containers = await this.docker.listContainers({
       all: false,
-      filters: managedFilter(KIND_SANDBOX),
+      filters: managedFilter(KIND_SANDBOX, this.workspaceId),
     });
     return containers
       .map((c) => ({ id: c.Labels?.[LABEL_SANDBOX_ID] ?? "", providerRef: c.Id }))
