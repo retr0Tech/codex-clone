@@ -8,7 +8,7 @@ import Docker from "dockerode";
 import { eq } from "drizzle-orm";
 import { DEFAULT_LIMITS } from "@codex-clone/core";
 import { appendEvent, createDb, events, readEvents, repos, runs, tasks, type Database } from "@codex-clone/db";
-import { MirrorManager } from "@codex-clone/github";
+import { MirrorManager, listPersistedRepos } from "@codex-clone/github";
 import {
   acquireDockerTestLock,
   DockerSandbox,
@@ -227,7 +227,7 @@ describe(
     "claims a queued run, seeds the workspace, and streams a real agent turn into the event log",
     { timeout: TEST_TIMEOUT_MS },
     async () => {
-      const { taskId, runId } = await seedTask("add a CONTRIBUTING file");
+      const { taskId, runId, repoId } = await seedTask("add a CONTRIBUTING file");
       const { deps, gateway, fake } = makeDeps([
         [
           upstream.toolCall("call_1", "apply_patch", {
@@ -316,6 +316,22 @@ describe(
       assert.equal(run?.outputTokens, 110);
       assert.ok((run?.costUsd ?? 0) > 0, "cost should have been recorded by the gateway meter");
       assert.ok(run?.endedAt, "endedAt must be set so the run does not look in-flight");
+
+      /**
+       * The mirror is recorded, and that timestamp is what the repo picker
+       * sorts on. Without this write every repository looks equally untouched
+       * and the picker opens on whichever one happens to sort first
+       * alphabetically -- which is how it came to preselect a repo the user had
+       * never worked in.
+       */
+      const [repoRow] = await db.select().from(repos).where(eq(repos.id, repoId));
+      assert.ok(repoRow?.mirrorFetchedAt, "the run should have recorded when it fetched the mirror");
+      assert.ok(repoRow?.mirrorPath?.endsWith(".git"), `mirrorPath: ${repoRow?.mirrorPath}`);
+
+      // ...and it therefore sorts above every repository that has none, even
+      // though Postgres puts NULLs first on a descending sort by default.
+      const ordered = await listPersistedRepos(db);
+      assert.equal(ordered[0]?.id, repoId, `expected the freshly mirrored repo first, got ${ordered[0]?.fullName}`);
 
       const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId));
       assert.equal(task?.status, "idle");

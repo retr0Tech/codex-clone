@@ -17,7 +17,7 @@ import {
   toRow,
   type Database,
 } from "@codex-clone/db";
-import type { MirrorManager } from "@codex-clone/github";
+import { recordMirror, type MirrorManager } from "@codex-clone/github";
 import type { DockerSandboxSpec } from "@codex-clone/sandbox-docker";
 import { workspaceVolumeName } from "@codex-clone/sandbox-docker";
 import type { MeterRegistry } from "../gateway/metering.js";
@@ -267,7 +267,7 @@ async function start(
   const workBranch = task.workBranch ?? workBranchName(task.title, task.taskId);
 
   const token = await deps.githubToken();
-  await prepareWorkspace(
+  const prepared = await prepareWorkspace(
     {
       taskId: task.taskId,
       volumeName,
@@ -295,6 +295,17 @@ async function start(
     task.volumeName !== null,
   );
   await recordVolume(deps.db, task.taskId, volumeName, workBranch);
+
+  // Records where the mirror is and when it was last fetched. That timestamp is
+  // also the repo picker's "you were working here recently" signal -- without
+  // this write every repo looks equally untouched and the picker opens on
+  // whichever one sorts first alphabetically.
+  await recordMirror(deps.db, task.repo.fullName, {
+    mirrorPath: prepared.mirrorPath,
+    mirrorFetchedAt: prepared.mirrorFetchedAt,
+  }).catch((error: unknown) => {
+    log(`[task ${task.taskId.slice(0, 8)}] could not record the mirror: ${redact(String(error))}`);
+  });
 
   const setupScript = task.repo.setupScript ?? undefined;
   const spec: DockerSandboxSpec = {
