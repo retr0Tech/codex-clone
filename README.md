@@ -437,7 +437,7 @@ time** without touching each other's state:
 
 | | |
 |---|---|
-| `.conductor/setup.sh` | installs, builds, allocates ports, creates the workspace's database, migrates it, writes its `.env.local` |
+| `.conductor/setup.sh` | installs (the root `prepare` script builds the packages), allocates ports, creates the workspace's database, migrates it, writes its `.env.local` |
 | `.conductor/run.sh` | starts web + worker on the ports setup allocated |
 | `.conductor/archive.sh` | drops the database, data dir, containers, volumes and port reservations when the workspace is deleted |
 
@@ -467,6 +467,10 @@ nothing to reuse, setup generates a key and says so in a box you cannot miss —
 credentials encrypted under a different key are not recoverable, so that is not
 a thing to discover later. Each workspace has its own database either way, so
 Settings starts empty and you will enter the PAT and the API key again.
+
+The workspace's database is created empty and then migrated with the branch's
+own migrations, so it lands on the same schema version as everything else in
+the checkout rather than one behind.
 
 Nothing here is Conductor-specific: the scripts fall back to `git` when
 Conductor's environment variables are absent, so a plain `git worktree add`

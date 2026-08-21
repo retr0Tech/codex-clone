@@ -36,14 +36,12 @@ echo "conductor: path      ${WS_PATH}"
 if ! command -v pnpm >/dev/null 2>&1; then
   corepack enable >/dev/null 2>&1 || true
 fi
+# A worktree is a checkout that has never been built, and the apps import the
+# packages' compiled `dist/`. The root `prepare` script builds them as part of
+# install, so there is deliberately no separate build step here: a second one
+# would compile the same packages twice on every workspace creation.
 echo "conductor: installing dependencies"
 pnpm install --frozen-lockfile
-
-# The workspace packages are consumed as their compiled `dist/`, and a worktree
-# is a checkout that has never been built. Without this the worker cannot even
-# resolve @codex-clone/db.
-echo "conductor: building workspace packages"
-pnpm -r --filter "./packages/*" build
 
 # --- 2. ports ---------------------------------------------------------------
 #
