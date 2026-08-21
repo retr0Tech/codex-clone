@@ -43,6 +43,18 @@ export const config = {
   databaseUrl: env("DATABASE_URL", "postgres://codex:codex@localhost:5432/codex_clone"),
   dockerSocket: raw("DOCKER_SOCKET") ?? defaultDockerSocket,
 
+  /**
+   * Which checkout this worker is. Set per Conductor workspace by
+   * .conductor/setup.sh; `default` in an ordinary single-workspace checkout.
+   *
+   * Containers are labelled with it and boot reconciliation is filtered by it,
+   * because reconciliation destroys every managed sandbox no run in THIS
+   * worker's database claims -- and a sibling workspace's containers are
+   * exactly that. Without the scope, starting a second worker kills the first
+   * one's running agents.
+   */
+  workspaceId: raw("CODEX_WORKSPACE_ID") ?? "default",
+
   /** WebSocket hub. Lives in the worker because the worker sees events first. */
   wsPort: num("WORKER_WS_PORT", 8787),
   /** Local app: never bind to 0.0.0.0. */

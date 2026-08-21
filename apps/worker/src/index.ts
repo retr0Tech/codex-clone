@@ -42,6 +42,9 @@ async function main(): Promise<void> {
   const { db, close } = createDb(config.databaseUrl);
   await db.execute("select 1");
   console.log(`[worker] db connected`);
+  console.log(`[worker] workspace ${config.workspaceId}`);
+  console.log(`[worker] data dir ${config.dataDir}`);
+  console.log(`[worker] gateway socket ${config.gatewaySocketPath}`);
   console.log(`[worker] docker socket ${config.dockerSocket}`);
 
   // Milestone 3: the sandbox provider. Every log line about a container goes
@@ -52,6 +55,10 @@ async function main(): Promise<void> {
     // container, so the prompt never travels as env.
     jobSpecDir: join(config.dataDir, "jobs"),
     defaultMaxTurns: config.budget.maxTurns,
+    // Scopes list() -- and therefore boot reconciliation -- to this checkout,
+    // so two Conductor workspaces sharing one Docker daemon do not destroy
+    // each other's containers.
+    workspaceId: config.workspaceId,
     onStderr: (line, handle) => console.warn(`[sandbox ${handle.id.slice(0, 8)}] ${redact(line)}`),
   });
 
