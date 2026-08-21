@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, type WriteStream } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
@@ -95,6 +95,18 @@ export class FsSnapshotStore implements SnapshotStore {
     const hash = createHash("sha256");
     let sizeBytes = 0;
 
+    /**
+     * Held so the failure path can wait for it to close before deleting.
+     *
+     * `createWriteStream` opens the file asynchronously, so when the SOURCE
+     * fails immediately the rejection can reach the catch block before the
+     * destination has created the file at all -- `rm` then finds nothing, the
+     * open completes a tick later, and the `.part` is left behind for good.
+     * A leaked temp file per failed snapshot accumulates silently in the
+     * snapshots directory, which is exactly what this store promises not to do.
+     */
+    const dest = createWriteStream(tmpData, { mode: 0o600 });
+
     try {
       await pipeline(
         src,
@@ -105,7 +117,7 @@ export class FsSnapshotStore implements SnapshotStore {
             yield chunk;
           }
         },
-        createWriteStream(tmpData, { mode: 0o600 }),
+        dest,
       );
 
       const meta: StoredMeta = {
@@ -120,6 +132,8 @@ export class FsSnapshotStore implements SnapshotStore {
       await rename(tmpMeta, this.#metaPath(id));
       return meta;
     } catch (error) {
+      // Settle the destination first, or the delete below races its open.
+      await closed(dest);
       await Promise.all([rm(tmpData, { force: true }), rm(tmpMeta, { force: true })]).catch(() => undefined);
       throw error instanceof SnapshotError
         ? error
@@ -176,6 +190,20 @@ export class FsSnapshotStore implements SnapshotStore {
     await rm(this.#metaPath(id), { force: true });
     await rm(this.pathFor(id), { force: true });
   }
+}
+
+/**
+ * Resolves once a write stream has finished opening and closing, however it
+ * ended. Never rejects: the caller is already handling a failure and only
+ * needs to know the file is no longer about to appear.
+ */
+function closed(stream: WriteStream): Promise<void> {
+  if (stream.closed) return Promise.resolve();
+  return new Promise((resolve) => {
+    stream.once("close", () => resolve());
+    stream.once("error", () => resolve());
+    stream.destroy();
+  });
 }
 
 /**
