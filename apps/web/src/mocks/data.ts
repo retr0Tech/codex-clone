@@ -1,5 +1,9 @@
 /**
- * Repos, tasks and scheduled jobs.
+ * Repos and tasks, for `/mock/transcript`.
+ *
+ * The scheduled-job fixtures that used to live here are gone: `/scheduled`
+ * reads real rows now, and a fixture nothing renders is a lie waiting to be
+ * mistaken for a feature.
  *
  * Shapes mirror `packages/db/src/schema.ts` so that replacing these arrays with
  * a Drizzle query is a one-line change per view. Dates are ISO strings, as they
@@ -31,29 +35,6 @@ export interface MockTask {
   additions: number;
   deletions: number;
   filesChanged: number;
-}
-
-export interface MockScheduledJob {
-  id: string;
-  name: string;
-  repoId: string;
-  prompt: string;
-  cronExpr: string;
-  cronHuman: string;
-  timezone: string;
-  enabled: boolean;
-  onOverlap: "skip" | "queue";
-  catchup: boolean;
-  autoPushBranch: boolean;
-  autoOpenPr: boolean;
-  nextRunAt: string;
-  lastRunAt: string | null;
-  recent: Array<{
-    id: string;
-    scheduledFor: string;
-    status: "claimed" | "running" | "succeeded" | "failed" | "skipped";
-    reason: string | null;
-  }>;
 }
 
 export const mockRepos: MockRepo[] = [
@@ -236,77 +217,6 @@ export const mockArchivedTasks: MockTask[] = [
     additions: 890,
     deletions: 410,
     filesChanged: 34,
-  },
-];
-
-export const mockScheduledJobs: MockScheduledJob[] = [
-  {
-    id: "job_dep_audit",
-    name: "Nightly dependency audit",
-    repoId: "repo_atlas",
-    prompt:
-      "Run the dependency audit. Open a PR that bumps any package with a known " +
-      "advisory, one package per commit, and summarise what changed.",
-    cronExpr: "0 3 * * *",
-    cronHuman: "Every day at 03:00",
-    timezone: "Europe/Lisbon",
-    enabled: true,
-    onOverlap: "skip",
-    catchup: true,
-    autoPushBranch: true,
-    autoOpenPr: true,
-    nextRunAt: "2026-08-21T02:00:00.000Z",
-    lastRunAt: "2026-08-20T02:00:00.000Z",
-    recent: [
-      { id: "ex_1", scheduledFor: "2026-08-20T02:00:00.000Z", status: "succeeded", reason: null },
-      { id: "ex_2", scheduledFor: "2026-08-19T02:00:00.000Z", status: "succeeded", reason: null },
-      {
-        id: "ex_3",
-        scheduledFor: "2026-08-18T02:00:00.000Z",
-        status: "skipped",
-        reason: "Previous execution still running (onOverlap: skip)",
-      },
-      { id: "ex_4", scheduledFor: "2026-08-17T02:00:00.000Z", status: "failed", reason: "setup script exited 1" },
-    ],
-  },
-  {
-    id: "job_flake_hunt",
-    name: "Weekly flake hunt",
-    repoId: "repo_console",
-    prompt:
-      "Run the full test suite five times. For any test that is not deterministic, " +
-      "open an issue-shaped summary with the reproduction command.",
-    cronExpr: "0 6 * * 1",
-    cronHuman: "Mondays at 06:00",
-    timezone: "Europe/Lisbon",
-    enabled: true,
-    onOverlap: "queue",
-    catchup: false,
-    autoPushBranch: true,
-    autoOpenPr: false,
-    nextRunAt: "2026-08-24T05:00:00.000Z",
-    lastRunAt: "2026-08-17T05:00:00.000Z",
-    recent: [
-      { id: "ex_5", scheduledFor: "2026-08-17T05:00:00.000Z", status: "succeeded", reason: null },
-      { id: "ex_6", scheduledFor: "2026-08-10T05:00:00.000Z", status: "succeeded", reason: null },
-    ],
-  },
-  {
-    id: "job_changelog",
-    name: "Draft the release changelog",
-    repoId: "repo_ledger",
-    prompt: "Summarise everything merged into main since the last tag as a changelog entry.",
-    cronExpr: "0 17 * * 5",
-    cronHuman: "Fridays at 17:00",
-    timezone: "Europe/Lisbon",
-    enabled: false,
-    onOverlap: "skip",
-    catchup: false,
-    autoPushBranch: false,
-    autoOpenPr: false,
-    nextRunAt: "2026-08-21T16:00:00.000Z",
-    lastRunAt: "2026-08-08T16:00:00.000Z",
-    recent: [{ id: "ex_7", scheduledFor: "2026-08-08T16:00:00.000Z", status: "succeeded", reason: null }],
   },
 ];
 

@@ -8,7 +8,7 @@ import { Badge } from "./ui/Badge";
 import { ThemeToggle } from "./ThemeToggle";
 import { cn } from "./ui/cn";
 import { useWorkspace } from "./WorkspaceContext";
-import { mockScheduledJobs } from "../mocks/data";
+import { useScheduledJobs } from "../lib/useScheduledJobs";
 import { useTasks } from "../lib/useTasks";
 import { STATUS_META, TASK_STATUS_META } from "../lib/status";
 
@@ -84,6 +84,8 @@ export function Sidebar() {
   const { repos, repo, branches, branch, loadingRepos, error, setRepoFullName, setBranch, refreshRepos } =
     useWorkspace();
   const { tasks } = useTasks();
+  // Real rows now, not fixtures: the badge is a count of schedules that exist.
+  const { jobs: scheduledJobs } = useScheduledJobs();
 
   const active = tasks.filter((t) => t.status !== "archived");
   const archived = tasks.filter((t) => t.status === "archived");
@@ -163,7 +165,7 @@ export function Sidebar() {
           href="/scheduled"
           icon={icons.scheduled}
           active={pathname.startsWith("/scheduled")}
-          count={mockScheduledJobs.length}
+          count={scheduledJobs.length}
         >
           Scheduled
         </NavLink>
