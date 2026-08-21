@@ -47,6 +47,18 @@ export class RunNowError extends Error {
   }
 }
 
+/**
+ * A separate class so the control route can answer 404 rather than 409.
+ * "There is no such job" and "that job is busy" are different things to be
+ * told, and a caller that cannot tell them apart cannot retry sensibly.
+ */
+export class NoSuchJobError extends RunNowError {
+  constructor(jobId: string) {
+    super(`no scheduled job ${jobId}`);
+    this.name = "NoSuchJobError";
+  }
+}
+
 export class Scheduler {
   #timer: NodeJS.Timeout | null = null;
   #stopping = false;
@@ -178,7 +190,7 @@ export class Scheduler {
       where j.id = ${jobId}
       limit 1
     `);
-    if (!row) throw new RunNowError(`no scheduled job ${jobId}`);
+    if (!row) throw new NoSuchJobError(jobId);
 
     if (await hasActiveExecution(deps.db, jobId)) {
       throw new RunNowError("this job already has an execution in flight; wait for it to finish");

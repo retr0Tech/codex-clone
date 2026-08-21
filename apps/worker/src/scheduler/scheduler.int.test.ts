@@ -16,7 +16,7 @@ import { PublishError } from "../runner/publish.js";
 import { TEST_DATABASE_URL, postgresUnavailable, withTimeout } from "../runner/testing.js";
 import { claimDueJobs } from "./claim.js";
 import { scheduledBranchName } from "./execute.js";
-import { RunNowError, Scheduler, type TickResult } from "./scheduler.js";
+import { NoSuchJobError, RunNowError, Scheduler, type TickResult } from "./scheduler.js";
 import type { SchedulerDeps } from "./types.js";
 
 /**
@@ -678,9 +678,12 @@ describe(
         );
         assert.equal((await executionsOf(jobId)).length, 1);
 
+        // A distinct class, because "there is no such job" and "that job is
+        // busy" are different things to be told: the control route answers 404
+        // for one and 409 for the other.
         await assert.rejects(
           () => h.scheduler.runNow("job-that-does-not-exist"),
-          (error: unknown) => error instanceof RunNowError,
+          (error: unknown) => error instanceof NoSuchJobError,
         );
 
         await finishRun(fired.taskId, "succeeded");
