@@ -130,10 +130,12 @@ export function truncatePatch(patch: string, limit = MAX_PATCH_BYTES): { patch: 
   if (Buffer.byteLength(patch, "utf8") <= limit) return { patch, truncated: false };
 
   const clipped = Buffer.from(patch, "utf8").subarray(0, limit).toString("utf8");
+  // Cut at a line boundary: half a hunk renders as a corrupt one, and the
+  // reader cannot tell the difference between that and a real malformed diff.
   const lastNewline = clipped.lastIndexOf("\n");
-  const body = lastNewline > 0 ? clipped.slice(0, lastNewline + 1) : clipped;
+  const body = lastNewline > 0 ? clipped.slice(0, lastNewline + 1) : `${clipped}\n`;
   return {
-    patch: `${body}\n… patch truncated at ${limit} bytes; the file list above is complete.\n`,
+    patch: `${body}… patch truncated at ${limit} bytes; the file list above is complete.\n`,
     truncated: true,
   };
 }

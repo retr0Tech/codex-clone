@@ -40,6 +40,12 @@ export interface PublishDeps {
   docker: Docker;
   githubToken: () => Promise<string | null>;
   config: { image: string; dataDir: string };
+  /**
+   * Where the branch is pushed. Injectable for the same reason the supervisor's
+   * is: the integration test pushes to a bare repository on local disk, which
+   * exercises the identical commit-and-push path without a network or a token.
+   */
+  remoteUrl?: (repo: { owner: string; name: string; fullName: string }) => string;
   log?: (message: string) => void;
 }
 
@@ -88,10 +94,14 @@ export async function publishTask(
     throw new PublishError("this task has no work branch yet; run it once before pushing");
   }
 
-  const token = await deps.githubToken();
-  if (!token) throw new PublishError("No GitHub token is configured. Add one on the Settings page.");
+  const remoteUrl = (deps.remoteUrl ?? defaultRemoteUrl)(task.repo);
+  const needsToken = remoteUrl.startsWith("https://");
 
-  const cloneUrl = `https://github.com/${task.repo.fullName}.git`;
+  const token = await deps.githubToken();
+  if (needsToken && !token) {
+    throw new PublishError("No GitHub token is configured. Add one on the Settings page.");
+  }
+
   const branch = task.workBranch;
   const log = deps.log ?? (() => undefined);
 
@@ -125,7 +135,10 @@ export async function publishTask(
       // The token is supplied per invocation through an env-reading credential
       // helper, so it lands neither in .git/config nor in the process argv.
       log(`[publish ${taskId.slice(0, 8)}] pushing ${branch}`);
-      await git(["push", "--set-upstream", cloneUrl, `HEAD:refs/heads/${branch}`], { cwd: dir, token });
+      await git(["push", remoteUrl, `HEAD:refs/heads/${branch}`], {
+        cwd: dir,
+        ...(needsToken && token ? { token } : {}),
+      });
 
       if (filesChanged > 0) {
         // Only `.git`: the commit changed history, not the working tree. Keeps
@@ -153,6 +166,7 @@ export async function publishTask(
   );
 
   if (!options.openPullRequest) return { ...pushed, pullRequest: null };
+  if (!token) throw new PublishError("No GitHub token is configured. Add one on the Settings page.");
 
   const client = new GitHubClient(createOctokit(token));
   try {
@@ -173,6 +187,10 @@ export async function publishTask(
       )}`,
     );
   }
+}
+
+function defaultRemoteUrl(repo: { fullName: string }): string {
+  return `https://github.com/${repo.fullName}.git`;
 }
 
 function commitMessage(title: string, filesChanged: number): string {
