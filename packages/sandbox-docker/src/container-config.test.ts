@@ -8,6 +8,7 @@ import {
   buildContainerConfig,
   SecretInEnvError,
 } from "./container-config.js";
+import { DEFAULT_WORKSPACE_ID, LABEL_WORKSPACE, managedFilter } from "./labels.js";
 
 /**
  * These flags are the security boundary of the product, so they are asserted
@@ -145,6 +146,45 @@ describe("buildContainerConfig isolation", () => {
 
   it("allocates no TTY, so stdout and stderr stay separable", () => {
     assert.equal(build().Tty, false);
+  });
+});
+
+/**
+ * The workspace label and the filter that reads it are one mechanism, and the
+ * failure when they drift is silent and destructive: boot reconciliation
+ * destroys every managed sandbox no run in ITS database claims, so an
+ * unlabelled container or an unfiltered list means one Conductor workspace
+ * tears down another's running agents.
+ */
+describe("workspace scoping", () => {
+  it("labels the container with the owning workspace", () => {
+    const cfg = buildContainerConfig({
+      spec: spec(),
+      sandboxId: "sbx-1",
+      containerName: "codex-sbx-1",
+      jobSpecHostPath: "/host/jobs/sbx-1.json",
+      workspaceId: "paris_1db051",
+    });
+    assert.equal(cfg.Labels?.[LABEL_WORKSPACE], "paris_1db051");
+  });
+
+  it("labels an unconfigured checkout `default`", () => {
+    assert.equal(build().Labels?.[LABEL_WORKSPACE], DEFAULT_WORKSPACE_ID);
+  });
+
+  it("filters by workspace, so one worker cannot see another's sandboxes", () => {
+    assert.deepEqual(managedFilter("sandbox", "paris_1db051").label, [
+      "com.codex-clone.managed=true",
+      "com.codex-clone.kind=sandbox",
+      "com.codex-clone.workspace=paris_1db051",
+    ]);
+  });
+
+  it("omits the workspace term when none is given, matching the pre-Conductor filter", () => {
+    assert.deepEqual(managedFilter("sandbox").label, [
+      "com.codex-clone.managed=true",
+      "com.codex-clone.kind=sandbox",
+    ]);
   });
 });
 
