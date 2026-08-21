@@ -1,4 +1,4 @@
-import type { RunPhase, RunStatus } from "@codex-clone/core";
+import type { BudgetBreach, RunPhase, RunStatus } from "@codex-clone/core";
 
 /**
  * What the REST layer returns, in one place both sides can see.
@@ -18,8 +18,17 @@ export interface RunView {
   status: RunStatus;
   phase: RunPhase;
   stopReason: string | null;
+  /**
+   * Which bound stopped this run, or null. Null for a cancelled run: the
+   * distinction between "you stopped it" and "it ran out of budget" is carried
+   * as data rather than inferred from the numbers, because inferring it is how
+   * a cancelled run came to be reported as a budget breach.
+   */
+  budgetBreach: BudgetBreach | null;
   turns: number;
+  /** Total prompt tokens. `cachedInputTokens` is a SUBSET of this, not an addition. */
   inputTokens: number;
+  /** Served from the prompt cache, billed at roughly a tenth of the input rate. */
   cachedInputTokens: number;
   outputTokens: number;
   costUsd: number;

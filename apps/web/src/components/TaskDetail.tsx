@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
+import type { RunBudget } from "@codex-clone/core";
 import { isTerminal, transcriptItems } from "../lib/eventReducer";
 import { useTranscriptStream, type ConnectionState } from "../lib/useTranscriptStream";
 import type { RunView, TaskView } from "../lib/types";
@@ -9,6 +10,7 @@ import { StickToBottom } from "./StickToBottom";
 import { ArchiveActions } from "./archive/ArchiveActions";
 import { Transcript } from "./transcript/Transcript";
 import { DiffCard, DiffView } from "./diff/DiffView";
+import { UsagePanel } from "./usage/UsagePanel";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
 import { Segmented, Textarea } from "./ui/Field";
@@ -16,8 +18,9 @@ import { Spinner, EmptyState, Kbd } from "./ui/misc";
 import { cn } from "./ui/cn";
 import { formatDuration, shortSha } from "../lib/format";
 import { STATUS_META } from "../lib/status";
+import { formatTokens, formatUsd, sumUsage, totalTokens } from "../lib/usage";
 
-type Tab = "transcript" | "diff";
+type Tab = "transcript" | "diff" | "usage";
 
 /**
  * One task, live.
@@ -32,7 +35,17 @@ type Tab = "transcript" | "diff";
  * SHA, cost so far. The moment the stream produces a status it takes over,
  * because the stream is ahead of anything a page render could have read.
  */
-export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunView[]; wsUrl: string }) {
+export function TaskDetail({
+  task,
+  runs,
+  wsUrl,
+  budget,
+}: {
+  task: TaskView;
+  runs: RunView[];
+  wsUrl: string;
+  budget: RunBudget;
+}) {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>("transcript");
   const [followUp, setFollowUp] = useState("");
@@ -41,6 +54,18 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
   const [publish, setPublish] = useState<PublishState | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /**
+   * The run this client has asked to stop.
+   *
+   * Held locally rather than derived from the stream, because there is nothing
+   * in the stream to derive it from and there should not be: cancel is
+   * acknowledged by the run actually winding down, and the wind-down is not
+   * instant. The agent is granted one final turn to commit what it has, so
+   * "Cancelling…" is a real state that lasts seconds, not a flicker before the
+   * status flips. Showing the Cancel button as still clickable through that
+   * window invites a second click that does nothing.
+   */
+  const [cancelRequested, setCancelRequested] = useState<string | null>(null);
 
   const stream = useTranscriptStream({ taskId: task.id, wsUrl });
   const { state } = stream;
@@ -63,7 +88,22 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
       ? Date.parse(state.events[state.events.length - 1]!.createdAt) - Date.parse(state.events[0]!.createdAt)
       : 0;
 
-  const spent = runs.reduce((total, run) => total + run.costUsd, 0);
+  const usage = sumUsage(runs);
+  /** True from the click until the run reaches a terminal status. */
+  const cancelling = cancelRequested !== null && cancelRequested === runId && running;
+
+  // A new run (a follow-up turn) must not inherit the previous one's pending
+  // cancel, and a run that has finished winding down is no longer cancelling.
+  useEffect(() => {
+    if (cancelRequested !== null && (cancelRequested !== runId || !running)) setCancelRequested(null);
+  }, [cancelRequested, runId, running]);
+
+  const requestCancel = useCallback(() => {
+    if (!runId || cancelling) return;
+    setCancelRequested(runId);
+    setActionError(null);
+    stream.cancel(runId);
+  }, [runId, cancelling, stream]);
 
   /**
    * A follow-up is a NEW run against the same warm workspace, not a mutation of
@@ -177,6 +217,7 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
             </div>
           </div>
 
+          {cancelling ? <CancellingBanner /> : null}
           {stopReason ? <p className="mt-2 text-[12.5px] text-fg-muted">{stopReason}</p> : null}
           {actionError ? (
             <p className="mt-2 rounded-md border border-danger/40 bg-danger-soft px-2.5 py-1.5 text-[12px] text-danger">
@@ -204,6 +245,19 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
                       Diff
                       {state.latestDiff ? (
                         <span className="font-mono text-[11px] text-fg-faint">{state.latestDiff.files.length}</span>
+                      ) : null}
+                    </span>
+                  ),
+                },
+                {
+                  value: "usage",
+                  label: (
+                    <span className="flex items-center gap-1.5">
+                      Usage
+                      {usage.costUsd > 0 ? (
+                        <span className="font-mono text-[11px] tabular-nums text-fg-faint">
+                          {formatUsd(usage.costUsd)}
+                        </span>
                       ) : null}
                     </span>
                   ),
@@ -244,15 +298,24 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
               <Button
                 size="sm"
                 variant="danger"
-                onClick={() => stream.cancel(runId)}
-                disabled={stream.connection !== "live"}
+                onClick={requestCancel}
+                disabled={stream.connection !== "live" || cancelling}
                 title={
-                  stream.connection === "live"
-                    ? "Closes the gateway meter, then SIGTERM with a grace period. Partial work is kept."
-                    : "Cancel rides the socket; reconnecting…"
+                  cancelling
+                    ? "Already cancelling. The agent has one final turn to commit what it has."
+                    : stream.connection === "live"
+                      ? "Closes the gateway meter, then SIGTERM with a grace period. Partial work is kept."
+                      : "Cancel rides the socket; reconnecting…"
                 }
               >
-                Cancel
+                {cancelling ? (
+                  <span className="flex items-center gap-1.5">
+                    <Spinner className="size-3" />
+                    Cancelling…
+                  </span>
+                ) : (
+                  "Cancel run"
+                )}
               </Button>
             ) : null}
           </div>
@@ -269,12 +332,20 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
             <span className="text-[11.5px] text-warn">history unavailable: {stream.error}</span>
           ) : null}
           <span className="h-px flex-1" />
-          <span className="font-mono text-[11px] tabular-nums text-fg-faint">
+          <button
+            type="button"
+            onClick={() => setTab("usage")}
+            title="Tokens and cost, metered at the host gateway. Open the Usage tab for the breakdown."
+            className="rounded font-mono text-[11px] tabular-nums text-fg-faint hover:text-fg-muted"
+          >
             {runs.length > 0 ? `${runs.length} run${runs.length === 1 ? "" : "s"} · ` : ""}
             seq {state.lastSeq}
             {wallClock > 0 ? ` · ${formatDuration(wallClock)}` : ""}
-            {spent > 0 ? ` · $${spent.toFixed(4)}` : ""}
-          </span>
+            {usage.turns > 0 ? ` · ${usage.turns} turn${usage.turns === 1 ? "" : "s"}` : ""}
+            {usage.inputTokens + usage.outputTokens > 0 ? ` · ${formatTokens(totalTokens(usage))} tok` : ""}
+            {usage.cachedInputTokens > 0 ? ` (${formatTokens(usage.cachedInputTokens)} cached)` : ""}
+            {usage.costUsd > 0 ? ` · ${formatUsd(usage.costUsd)}` : ""}
+          </button>
         </div>
       </div>
 
@@ -303,6 +374,8 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
             ) : (
               <Transcript items={items} renderDiff={(diff) => <DiffCard diff={diff} />} />
             )
+          ) : tab === "usage" ? (
+            <UsagePanel runs={runs} budget={budget} />
           ) : state.latestDiff ? (
             <DiffView diff={state.latestDiff} />
           ) : (
@@ -367,6 +440,27 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
           </div>
         </div>
       </footer>
+    </div>
+  );
+}
+
+/**
+ * What "Cancelling…" actually means, while it is happening.
+ *
+ * The gateway meter is closed the instant the frame lands, so no further model
+ * call is admitted even mid-turn — but the container is then SIGTERMed with a
+ * grace period, and the agent is given one final turn to commit what it has.
+ * That window is seconds, not milliseconds, and a UI that says nothing during
+ * it looks like a button that did not work.
+ */
+function CancellingBanner() {
+  return (
+    <div className="mt-2 flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft px-2.5 py-2 text-[12px] text-warn">
+      <Spinner className="mt-px size-3 shrink-0" />
+      <p>
+        Cancelling. The gateway has stopped admitting model calls for this run; the container gets a grace period to
+        wind down and commit what it has. Partial work is kept — the workspace volume is the live state.
+      </p>
     </div>
   );
 }

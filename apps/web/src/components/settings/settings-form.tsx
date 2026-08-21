@@ -32,6 +32,11 @@ export function SettingsForm({ initial }: { initial: SettingsView }) {
   });
   const [defaultModel, setDefaultModel] = useState(initial.defaultModel);
   const [maxSandboxes, setMaxSandboxes] = useState(String(initial.maxConcurrentSandboxes));
+  // Held as strings: a number input the user has half-cleared is "" for a
+  // moment, and coercing that to 0 on every keystroke fights the person typing.
+  const [maxTurns, setMaxTurns] = useState(String(initial.budget.maxTurns));
+  const [maxCostUsd, setMaxCostUsd] = useState(String(initial.budget.maxCostUsd));
+  const [wallClockMin, setWallClockMin] = useState(String(initial.budget.wallClockMs / 60_000));
   const [saving, setSaving] = useState(false);
   const [banner, setBanner] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
@@ -71,6 +76,13 @@ export function SettingsForm({ initial }: { initial: SettingsView }) {
     const payload: Record<string, unknown> = {
       defaultModel,
       maxConcurrentSandboxes: Number(maxSandboxes),
+      budget: {
+        maxTurns: Number(maxTurns),
+        maxCostUsd: Number(maxCostUsd),
+        // Entered in minutes because nobody thinks in milliseconds; stored in
+        // milliseconds because that is what the gateway and the deadline use.
+        wallClockMs: Math.round(Number(wallClockMin) * 60_000),
+      },
     };
     for (const key of ["githubToken", "openaiKey"] as const) {
       if (removing[key]) payload[key] = null;
@@ -91,6 +103,11 @@ export function SettingsForm({ initial }: { initial: SettingsView }) {
       setView(data);
       setDefaultModel(data.defaultModel);
       setMaxSandboxes(String(data.maxConcurrentSandboxes));
+      // Echoed back from what was actually stored, so a value the server
+      // normalised is visible rather than only what was typed.
+      setMaxTurns(String(data.budget.maxTurns));
+      setMaxCostUsd(String(data.budget.maxCostUsd));
+      setWallClockMin(String(data.budget.wallClockMs / 60_000));
       // Drop what was typed: the value is stored now and must not linger in
       // the DOM or in React state.
       setTyped({ githubToken: "", openaiKey: "" });
@@ -181,6 +198,54 @@ export function SettingsForm({ initial }: { initial: SettingsView }) {
         </div>
       </section>
 
+      {/* Milestone 10. Budgets are enforced at the model gateway -- the one
+          component every model call passes through -- and applied to each run
+          as it starts, so an edit here lands on the next run. */}
+      <section className="rounded-lg border border-black/10 dark:border-white/15 p-5">
+        <h2 className="text-sm font-semibold">Run budget</h2>
+        <p className="mt-1 max-w-2xl text-sm opacity-70">
+          The bounds every new run is measured against. Reaching one does not kill the run outright: the gateway
+          injects a wind-down instruction and grants exactly one more turn so the agent can commit what it has, and
+          only then is the container stopped. Partial work survives either way — the workspace volume is the live
+          state. A run already in flight keeps the budget it started with.
+        </p>
+        <div className="mt-4 grid gap-4 sm:grid-cols-3">
+          <NumberField
+            id="budgetMaxTurns"
+            label="Max turns"
+            hint="Model calls, not tool calls."
+            value={maxTurns}
+            onChange={setMaxTurns}
+            disabled={saving}
+            min={1}
+            max={200}
+            step={1}
+          />
+          <NumberField
+            id="budgetMaxCostUsd"
+            label="Max cost (USD)"
+            hint="Bounds a runaway run, not a normal one."
+            value={maxCostUsd}
+            onChange={setMaxCostUsd}
+            disabled={saving}
+            min={0.01}
+            max={50}
+            step={0.01}
+          />
+          <NumberField
+            id="budgetWallClockMin"
+            label="Wall clock (minutes)"
+            hint="Enforced by a host timer too, so a wedged run still stops."
+            value={wallClockMin}
+            onChange={setWallClockMin}
+            disabled={saving}
+            min={0.5}
+            max={240}
+            step={0.5}
+          />
+        </div>
+      </section>
+
       <div className="flex flex-wrap items-center gap-3">
         <button
           type="submit"
@@ -201,5 +266,48 @@ export function SettingsForm({ initial }: { initial: SettingsView }) {
         ) : null}
       </div>
     </form>
+  );
+}
+
+/** The Settings page predates the shared UI kit, so it styles its own inputs. */
+function NumberField({
+  id,
+  label,
+  hint,
+  value,
+  onChange,
+  disabled,
+  min,
+  max,
+  step,
+}: {
+  id: string;
+  label: string;
+  hint: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+  min: number;
+  max: number;
+  step: number;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label htmlFor={id} className="text-sm">
+        {label}
+      </label>
+      <input
+        id={id}
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        className="rounded-md border border-black/15 dark:border-white/20 bg-transparent px-3 py-2 font-mono text-sm outline-none focus:border-black/50 dark:focus:border-white/50 disabled:opacity-50"
+      />
+      <p className="text-xs opacity-60">{hint}</p>
+    </div>
   );
 }

@@ -77,6 +77,12 @@ const icons = {
       <path d="M6.6 5.6 10.4 8l-3.8 2.4Z" fill="currentColor" />
     </svg>
   ),
+  usage: (
+    <svg viewBox="0 0 16 16" className={ICON} aria-hidden fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M2.4 13.4h11.2" strokeLinecap="round" />
+      <path d="M4.4 11.4V7.2M8 11.4V3.4M11.6 11.4V8.8" strokeLinecap="round" />
+    </svg>
+  ),
 };
 
 export function Sidebar() {
@@ -168,6 +174,11 @@ export function Sidebar() {
           count={scheduledJobs.length}
         >
           Scheduled
+        </NavLink>
+        {/* Milestone 10. The gateway has been metering every run since
+            milestone 4; this is where those figures finally surface. */}
+        <NavLink href="/usage" icon={icons.usage} active={pathname.startsWith("/usage")}>
+          Usage
         </NavLink>
         {/* Wave A owns the Settings page; this only links to the route. */}
         <NavLink href="/settings" icon={icons.settings} active={pathname.startsWith("/settings")}>
