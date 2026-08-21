@@ -8,6 +8,7 @@ import {
   transcriptReducer,
   type TranscriptState,
 } from "./eventReducer";
+import { advanceCursor, reconnectDelayMs, shouldResetOnHello } from "./streamPolicy";
 
 /**
  * The live transcript, over the worker's WebSocket.
@@ -46,10 +47,6 @@ export interface TranscriptStream {
   error: string | null;
   cancel: (runId: string) => void;
 }
-
-/** Backoff for reconnects: fast enough to be invisible, capped so a worker that is down is not hammered. */
-const RECONNECT_MIN_MS = 300;
-const RECONNECT_MAX_MS = 5_000;
 
 export function useTranscriptStream({ taskId, wsUrl }: { taskId: string; wsUrl: string }): TranscriptStream {
   const [state, dispatch] = useReducer(transcriptReducer, initialTranscriptState);
@@ -107,7 +104,7 @@ export function useTranscriptStream({ taskId, wsUrl }: { taskId: string; wsUrl: 
         // Advanced here rather than waiting for the reducer's state to land in
         // a render: `connect()` runs immediately after this and needs the
         // cursor NOW, or it would ask the socket to resend everything.
-        if (row.seq > lastSeqRef.current) lastSeqRef.current = row.seq;
+        lastSeqRef.current = advanceCursor(lastSeqRef.current, eventFrame(row));
       }
     };
 
@@ -137,19 +134,16 @@ export function useTranscriptStream({ taskId, wsUrl }: { taskId: string; wsUrl: 
 
         if (frame.kind === "hello") {
           setServerLatestSeq(frame.latestSeq);
-          // The reducer resets on hello so switching tasks cannot inherit half
-          // a transcript. On a RECONNECT that reset would throw away everything
-          // before the cursor we just resumed from, so it is suppressed: the
-          // server is backfilling the gap, not the whole log.
-          if (helloSeenRef.current) return;
+          // See streamPolicy.ts: the reducer resets on hello, which is right
+          // for a first connect and wrong for a reconnect.
+          const reset = shouldResetOnHello(helloSeenRef.current);
           helloSeenRef.current = true;
+          if (!reset) return;
         }
         // Same reason as the history fold: a drop can happen between two
         // messages and the next connect must resume from the real cursor, not
         // from whatever the last render happened to see.
-        if (frame.kind === "event" && frame.event.seq > lastSeqRef.current) {
-          lastSeqRef.current = frame.event.seq;
-        }
+        lastSeqRef.current = advanceCursor(lastSeqRef.current, frame);
         dispatch(frame);
       };
 
@@ -163,8 +157,7 @@ export function useTranscriptStream({ taskId, wsUrl }: { taskId: string; wsUrl: 
         socketRef.current = null;
         setConnection("reconnecting");
         attempt += 1;
-        const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** (attempt - 1));
-        retryTimer = setTimeout(connect, delay);
+        retryTimer = setTimeout(connect, reconnectDelayMs(attempt));
       };
     };
 
