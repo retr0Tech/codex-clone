@@ -59,6 +59,12 @@ export interface SupervisorDeps {
   githubToken: () => Promise<string | null>;
   /** Model for this run, from the Settings row. */
   model: () => Promise<string>;
+  /**
+   * Where a repository is cloned from. Injectable so the integration test can
+   * point at a bare repo on local disk instead of github.com -- the mirror
+   * layer is the same either way, which is the point of having one.
+   */
+  cloneUrl?: (repo: { owner: string; name: string; fullName: string }) => string;
   config: {
     image: string;
     gatewaySocketPath: string;
@@ -182,6 +188,10 @@ export async function superviseRun(
   return finalize(deps, { runId, taskId }, { handle, agentStatus, failure, controller, emit });
 }
 
+function defaultCloneUrl(repo: { fullName: string }): string {
+  return `https://github.com/${repo.fullName}.git`;
+}
+
 /** Mirror, clone, seed, then create the container. */
 async function start(
   deps: SupervisorDeps,
@@ -201,7 +211,7 @@ async function start(
       repo: {
         owner: task.repo.owner,
         name: task.repo.name,
-        cloneUrl: `https://github.com/${task.repo.fullName}.git`,
+        cloneUrl: (deps.cloneUrl ?? defaultCloneUrl)(task.repo),
       },
       baseSha: task.baseSha,
       workBranch,
