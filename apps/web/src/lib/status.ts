@@ -11,9 +11,21 @@ export const STATUS_META: Record<RunStatus, { label: string; tone: Tone; blurb: 
   running: { label: "Running", tone: "info", blurb: "The agent is working in its container." },
   succeeded: { label: "Succeeded", tone: "ok", blurb: "The agent finished on its own terms." },
   failed: { label: "Failed", tone: "danger", blurb: "The run ended on an error." },
-  cancelled: { label: "Cancelled", tone: "warn", blurb: "Stopped from the UI. Partial work is kept." },
-  timed_out: { label: "Timed out", tone: "warn", blurb: "Wall-clock budget reached." },
-  budget_exhausted: { label: "Budget exhausted", tone: "warn", blurb: "Cost or turn ceiling reached." },
+  cancelled: {
+    label: "Cancelled",
+    tone: "warn",
+    blurb: "Stopped from the UI. Partial work is kept, and this is never a budget breach.",
+  },
+  timed_out: {
+    label: "Timed out",
+    tone: "warn",
+    blurb: "The wall clock ran out. Enforced by a host timer, so a wedged run still stops.",
+  },
+  budget_exhausted: {
+    label: "Budget exhausted",
+    tone: "warn",
+    blurb: "The turn or cost ceiling was reached, after a final wind-down turn.",
+  },
 };
 
 export const PHASE_META: Record<RunPhase, { label: string; blurb: string }> = {

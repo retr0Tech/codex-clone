@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { redact } from "@codex-clone/core";
+import { DEFAULT_BUDGET, redact } from "@codex-clone/core";
 
 import { DecryptionError, loadEncryptionKey } from "./crypto.js";
 import { CredentialStore, inMemorySettingsRepository } from "./store.js";
@@ -163,5 +163,30 @@ describe("CredentialStore", () => {
     const view = await store.view();
     assert.equal(view.defaultModel, "gpt-5");
     assert.equal(view.maxConcurrentSandboxes, 3);
+  });
+
+  /**
+   * The run budget lives in this same singleton row (milestone 10). It is not
+   * secret, so it goes through `view()` rather than `get()` -- but it must
+   * round-trip exactly, because the gateway enforces whatever is stored here
+   * and a bound that silently reverted would be a ceiling nobody is under.
+   */
+  it("stores the run budget, and defaults it to the shipped bounds", async () => {
+    const { store } = makeStore();
+    assert.deepEqual((await store.view()).budget, DEFAULT_BUDGET);
+    assert.deepEqual(await store.budget(), DEFAULT_BUDGET);
+
+    const tighter = { maxTurns: 12, maxCostUsd: 0.25, wallClockMs: 5 * 60_000 };
+    await store.setPreferences({ budget: tighter });
+    assert.deepEqual(await store.budget(), tighter);
+    assert.deepEqual((await store.view()).budget, tighter);
+  });
+
+  it("writes the budget as one unit, so no half-applied combination is stored", async () => {
+    const { store } = makeStore();
+    await store.setPreferences({ budget: { maxTurns: 5, maxCostUsd: 2, wallClockMs: 60_000 } });
+    // A later patch that touches only the model must leave every bound alone.
+    await store.setPreferences({ defaultModel: "gpt-5-nano" });
+    assert.deepEqual(await store.budget(), { maxTurns: 5, maxCostUsd: 2, wallClockMs: 60_000 });
   });
 });

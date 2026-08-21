@@ -240,6 +240,7 @@ function toRunView(run: typeof runs.$inferSelect): RunView {
     status: run.status,
     phase: run.phase,
     stopReason: run.stopReason,
+    budgetBreach: run.budgetBreach,
     turns: run.turns,
     inputTokens: run.inputTokens,
     cachedInputTokens: run.cachedInputTokens,

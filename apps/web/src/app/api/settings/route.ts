@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 
+import type { RunBudget } from "@codex-clone/core";
+import { budgetProblem } from "@codex-clone/core";
 import type { CredentialName, SettingsView } from "@codex-clone/secrets";
 
 import { credentialStore } from "../_lib/settings-store";
@@ -34,6 +36,8 @@ interface SettingsPutBody {
   openaiKey?: string | null;
   defaultModel?: string;
   maxConcurrentSandboxes?: number;
+  /** Run bounds. Written as a unit or not at all -- see `parseBudget`. */
+  budget?: Partial<RunBudget>;
 }
 
 export async function PUT(request: Request) {
@@ -70,7 +74,7 @@ export async function PUT(request: Request) {
       changed.push(`${name}:set`);
     }
 
-    const prefs: { defaultModel?: string; maxConcurrentSandboxes?: number } = {};
+    const prefs: { defaultModel?: string; maxConcurrentSandboxes?: number; budget?: RunBudget } = {};
     if (typeof body.defaultModel === "string" && body.defaultModel.trim() !== "") {
       prefs.defaultModel = body.defaultModel.trim();
     }
@@ -80,6 +84,14 @@ export async function PUT(request: Request) {
         return NextResponse.json({ error: "maxConcurrentSandboxes must be an integer from 1 to 16." }, { status: 400 });
       }
       prefs.maxConcurrentSandboxes = n;
+    }
+    if (body.budget !== undefined) {
+      // Validated with the SAME function the worker's contract exposes, so the
+      // form can never store a budget the gateway would reject or clamp.
+      const candidate = mergeBudget((await store.view()).budget, body.budget);
+      const invalid = budgetProblem(candidate);
+      if (invalid) return NextResponse.json({ error: invalid }, { status: 400 });
+      prefs.budget = candidate;
     }
     await store.setPreferences(prefs);
 
@@ -91,6 +103,20 @@ export async function PUT(request: Request) {
   } catch (error) {
     return NextResponse.json({ error: message(error) }, { status: 500 });
   }
+}
+
+/**
+ * A partial budget over the stored one.
+ *
+ * An omitted bound keeps its stored value; a bound that arrives as something
+ * other than a number is passed through as `NaN` so `budgetProblem` reports it,
+ * rather than being silently dropped back to the stored value -- a form field
+ * the user cleared must not look like a successful save of the old number.
+ */
+function mergeBudget(current: RunBudget, patch: Partial<RunBudget>): RunBudget {
+  const pick = (key: keyof RunBudget): number =>
+    patch[key] === undefined ? current[key] : Number(patch[key]);
+  return { maxTurns: pick("maxTurns"), maxCostUsd: pick("maxCostUsd"), wallClockMs: pick("wallClockMs") };
 }
 
 /**

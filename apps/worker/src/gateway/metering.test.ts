@@ -40,7 +40,7 @@ describe("RunMeter budget enforcement", () => {
 
     const third = meter.admit();
     assert.equal(third.action, "refuse");
-    assert.equal(third.action === "refuse" && third.breach, "max_turns");
+    assert.equal(third.action === "refuse" && third.reason, "max_turns");
 
     // And it stays refused.
     assert.equal(meter.admit().action, "refuse");
@@ -66,31 +66,63 @@ describe("RunMeter budget enforcement", () => {
     assert.equal(next.action === "wind_down" && next.breach, "wall_clock");
   });
 
-  it("close() -- the cancel path -- refuses immediately with no wind-down turn", () => {
+  it("close() refuses immediately with no wind-down turn", () => {
     const meter = new RunMeter("run_1", budget, clock().now);
     meter.admit();
     meter.close("wall_clock");
     assert.equal(meter.closedReason, null, "a bare close carries no explanation of its own");
     const next = meter.admit();
     assert.equal(next.action, "refuse");
-    assert.equal(next.action === "refuse" && next.breach, "wall_clock");
+    assert.equal(next.action === "refuse" && next.reason, "wall_clock");
   });
 
   /**
    * A cancel and a wall-clock breach close the meter the same way, but they are
-   * not the same event -- and the refusal the agent receives ends up in the
-   * transcript. Telling a user who pressed Cancel that their budget was
-   * exhausted is a small lie in a place people read.
+   * NOT the same event -- and both the refusal the agent receives and the
+   * snapshot the worker persists end up in front of the user. Telling someone
+   * who pressed Cancel that their budget was exhausted is a small lie in a
+   * place people read, and it was a real bug.
    */
-  it("carries the closer's own reason, so a cancel does not read as a breach", () => {
+  it("cancel() is not a budget breach", () => {
     const meter = new RunMeter("run_1", budget, clock().now);
     meter.admit();
-    meter.close("wall_clock", "cancelled from the UI");
-    assert.equal(meter.closedReason, "cancelled from the UI");
-    // First reason wins: a later internal close must not overwrite what the
-    // user was told.
+    meter.cancel("cancelled from the UI");
+
+    const next = meter.admit();
+    assert.equal(next.action, "refuse");
+    assert.equal(next.action === "refuse" && next.reason, "cancelled");
+
+    const snapshot = meter.snapshot();
+    assert.equal(snapshot.breach, null, "a cancelled run must record no breach at all");
+    assert.equal(snapshot.cancelled, true);
+    assert.equal(snapshot.closedReason, "cancelled from the UI");
+  });
+
+  it("keeps the cancel reason even when a bound was already past", () => {
+    const meter = new RunMeter("run_1", { ...budget, maxTurns: 1 }, clock().now);
+    meter.admit();
+    meter.admit(); // wind-down: the meter now holds a max_turns breach
+    meter.cancel("cancelled from the UI");
+
+    const snapshot = meter.snapshot();
+    assert.equal(snapshot.cancelled, true);
+    assert.equal(snapshot.closedReason, "cancelled from the UI");
+    // The refusal the agent sees is the user's action, not the bound.
+    const next = meter.admit();
+    assert.equal(next.action === "refuse" && next.reason, "cancelled");
+  });
+
+  it("keeps the first reason: a later close must not overwrite what the user was told", () => {
+    const meter = new RunMeter("run_1", budget, clock().now);
+    meter.admit();
+    meter.cancel("cancelled from the UI");
     meter.close("max_cost", "something else");
     assert.equal(meter.closedReason, "cancelled from the UI");
+  });
+
+  it("carries the budget it was measured against into the snapshot", () => {
+    const meter = new RunMeter("run_1", budget, clock().now);
+    assert.deepEqual(meter.snapshot().budget, budget);
   });
 
   it("accumulates token counts across turns", () => {
@@ -118,6 +150,19 @@ describe("MeterRegistry", () => {
     assert.equal(snapshot?.turns, 1);
     assert.equal(registry.size, 1);
     assert.equal(registry.release("run_a"), null);
+  });
+
+  it("takes a per-run budget on first sight, and ignores one for a run already in flight", () => {
+    const registry = new MeterRegistry(budget, clock().now);
+    const tight: RunBudget = { maxTurns: 1, maxCostUsd: 0.01, wallClockMs: 1_000 };
+
+    const meter = registry.for("run_a", tight);
+    assert.deepEqual(meter.budget, tight, "a budget read at run start is the one the run is measured against");
+
+    // A ceiling must not move under a run that is already being measured.
+    assert.deepEqual(registry.for("run_a", budget).budget, tight);
+    // ...and a run with no override falls back to the registry default.
+    assert.deepEqual(registry.for("run_b").budget, budget);
   });
 });
 

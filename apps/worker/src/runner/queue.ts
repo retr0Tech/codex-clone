@@ -159,9 +159,13 @@ export class RunQueue {
     // Close the meter FIRST. A container mid-turn cannot be trusted to stop
     // itself, but it cannot make another model call once the gateway refuses --
     // so cancellation takes effect before the SIGTERM has even been sent.
+    //
+    // `cancel()` rather than `close(breach)`: this is not a budget breach, and
+    // the meter's snapshot is what the UI later renders. A run the user stopped
+    // must never be reported as one that ran out of budget.
     this.options.deps.meters
       .peek(runId)
-      ?.close("wall_clock", `${reason}; the gateway will make no further model calls for this run`);
+      ?.cancel(`${reason}; the gateway will make no further model calls for this run`);
 
     const handle = active.controller.handle;
     if (handle) {

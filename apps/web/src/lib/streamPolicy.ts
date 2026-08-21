@@ -66,3 +66,38 @@ export function reconnectDelayMs(attempt: number): number {
   if (attempt <= 1) return RECONNECT_MIN_MS;
   return Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** (attempt - 1));
 }
+
+/* -------------------------------------------------------------------------- */
+/* Cancellation                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Whether the UI should be showing "Cancelling…".
+ *
+ * There is no cancel acknowledgement on the wire, and there should not be: the
+ * only frames the socket carries are durable events plus the one named
+ * exception, token deltas (PLAN.md §3.6). Inventing a third ephemeral frame
+ * kind for an ack would be the first crack in "everything broadcast is also
+ * persisted". So the client remembers its own request, and the run winding down
+ * IS the acknowledgement.
+ *
+ * That wind-down is not instant. The gateway meter closes immediately, so no
+ * further model call is admitted even mid-turn -- but the agent is then given
+ * one final turn to commit what it has before the container is stopped.
+ * "Cancelling…" is therefore a real state lasting seconds, not a flicker.
+ *
+ * Two conditions beyond "the user clicked", and both matter:
+ *
+ *   requestedRunId === runId   a follow-up turn is a NEW run, and must not
+ *                              inherit the previous run's pending cancel
+ *   !terminal                  once the run has actually stopped, the status
+ *                              badge is the truth and the spinner is a lie
+ */
+export function isCancelling(
+  requestedRunId: string | null,
+  runId: string | null,
+  terminal: boolean,
+): boolean {
+  if (requestedRunId === null || runId === null) return false;
+  return requestedRunId === runId && !terminal;
+}

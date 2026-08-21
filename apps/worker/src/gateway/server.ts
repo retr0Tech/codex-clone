@@ -2,8 +2,8 @@ import { chmod, mkdir, stat, unlink } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { connect } from "node:net";
 import { dirname } from "node:path";
-import type { GatewayChunk, GatewayRequest, RunBudget, TokenUsage } from "@codex-clone/core";
-import { DEFAULT_BUDGET, registerSecret, WIND_DOWN_INSTRUCTION } from "@codex-clone/core";
+import type { BudgetBreach, GatewayChunk, GatewayRequest, RunBudget, TokenUsage } from "@codex-clone/core";
+import { BREACH_LABEL, DEFAULT_BUDGET, registerSecret, WIND_DOWN_INSTRUCTION } from "@codex-clone/core";
 import type { CredentialStore } from "./credentials.js";
 import { MeterRegistry, type RunMeterSnapshot } from "./metering.js";
 import { computeCost } from "./pricing.js";
@@ -31,7 +31,14 @@ export interface GatewayServerOptions {
   socketPath: string;
   credentials: CredentialStore;
   upstream: Upstream;
-  budget?: RunBudget;
+  /**
+   * The per-run budget. A function is resolved once per run -- on the first
+   * call the gateway sees for that runId -- so a budget edited in Settings
+   * takes effect on the next run without a worker restart, the same way the
+   * OpenAI key does. It is never re-read mid-run: a ceiling must not move under
+   * a run that is being measured against it.
+   */
+  budget?: RunBudget | (() => Promise<RunBudget>);
   now?: () => number;
   /**
    * Ephemeral token overlay for the live transcript (PLAN.md section 3.6).
@@ -50,7 +57,28 @@ export class GatewayServer {
   #server: Server | null = null;
 
   constructor(private readonly options: GatewayServerOptions) {
-    this.meters = new MeterRegistry(options.budget ?? DEFAULT_BUDGET, options.now ?? Date.now);
+    this.meters = new MeterRegistry(
+      typeof options.budget === "function" ? DEFAULT_BUDGET : (options.budget ?? DEFAULT_BUDGET),
+      options.now ?? Date.now,
+    );
+  }
+
+  /**
+   * The budget for a run that has not been metered yet.
+   *
+   * A failure to read it must not take the run down: falling back to the
+   * built-in default keeps the run bounded, which is the entire point, and a
+   * budget nobody could read is a Settings problem rather than a run problem.
+   */
+  async #budgetForNewRun(): Promise<RunBudget | undefined> {
+    const source = this.options.budget;
+    if (typeof source !== "function") return source;
+    try {
+      return await source();
+    } catch (err) {
+      this.options.onError?.(`could not read the configured run budget, using the default: ${String(err)}`);
+      return DEFAULT_BUDGET;
+    }
   }
 
   async listen(): Promise<void> {
@@ -168,19 +196,18 @@ export class GatewayServer {
       res.write(`${JSON.stringify(chunk)}\n`);
     };
 
-    const meter = this.meters.for(parsed.runId);
+    // Resolved before the meter exists, and only then: `for()` ignores the
+    // budget for a run it already holds, so this is once per run.
+    const meter = this.meters.peek(parsed.runId) ?? this.meters.for(parsed.runId, await this.#budgetForNewRun());
     const admission = meter.admit();
 
     if (admission.action === "refuse") {
       write({
         type: "refused",
-        reason: admission.breach,
-        // A meter closed deliberately (cancel) says so in its own words; only a
-        // real breach gets the budget wording. The refusal lands in the
-        // transcript, so it has to be true.
-        message:
-          meter.closedReason ??
-          `run budget exhausted (${admission.breach}); the wind-down turn has already been used`,
+        // `cancelled` is its own reason, never a budget breach. The refusal
+        // lands in the transcript, so it has to be true.
+        reason: admission.reason,
+        message: meter.closedReason ?? defaultRefusalMessage(admission.reason),
       });
       res.end();
       return;
@@ -257,6 +284,20 @@ export class GatewayServer {
     }
     res.end();
   }
+}
+
+/**
+ * The wording a refusal falls back to when nobody supplied one.
+ *
+ * Exhaustive on purpose: adding a bound to `BudgetBreach` should fail the build
+ * here rather than silently produce a refusal that says nothing useful.
+ */
+export function defaultRefusalMessage(reason: BudgetBreach | "cancelled"): string {
+  if (reason === "cancelled") {
+    return "this run was cancelled; the gateway will make no further model calls for it";
+  }
+  const label: string = BREACH_LABEL[reason];
+  return `run budget exhausted (${label}); the wind-down turn has already been used`;
 }
 
 /**

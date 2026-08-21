@@ -30,8 +30,8 @@ export type GatewayChunk =
   | { type: "reasoning"; text: string }
   | { type: "tool_call"; callId: string; name: string; args: string }
   | { type: "done"; usage: TokenUsage }
-  /** Budget breach or upstream failure. The agent must not hang on this. */
-  | { type: "refused"; reason: BudgetBreach | "upstream_error"; message: string };
+  /** Budget breach, cancellation or upstream failure. The agent must not hang on this. */
+  | { type: "refused"; reason: RefusalReason; message: string };
 
 export interface TokenUsage {
   inputTokens: number;
@@ -41,6 +41,25 @@ export interface TokenUsage {
 }
 
 export type BudgetBreach = "max_turns" | "max_cost" | "wall_clock";
+
+/**
+ * Why the gateway declined a call.
+ *
+ * `cancelled` is NOT a budget breach and must never be rendered as one. A
+ * previous milestone shipped a bug where stopping a run from the UI closed the
+ * meter with a `wall_clock` breach, and the transcript then told the user their
+ * budget was exhausted -- which was simply untrue. Carrying the distinction in
+ * the type rather than only in the prose message is what keeps that fixed: an
+ * exhaustive switch on this union cannot quietly lump the two together again.
+ */
+export type RefusalReason = BudgetBreach | "upstream_error" | "cancelled";
+
+/** One wording per bound, so the worker and the UI cannot describe it differently. */
+export const BREACH_LABEL: Record<BudgetBreach, string> = {
+  max_turns: "the turn ceiling",
+  max_cost: "the cost ceiling",
+  wall_clock: "the wall-clock limit",
+};
 
 export interface RunBudget {
   maxTurns: number;
@@ -82,5 +101,46 @@ export function checkBudget(budget: RunBudget, usage: BudgetUsage): BudgetBreach
   if (usage.turns >= budget.maxTurns) return "max_turns";
   if (usage.costUsd >= budget.maxCostUsd) return "max_cost";
   if (usage.elapsedMs >= budget.wallClockMs) return "wall_clock";
+  return null;
+}
+
+/**
+ * The accepted range for each bound, in one place.
+ *
+ * A budget is user-editable (Settings), so it arrives from an HTTP body and has
+ * to be validated somewhere. Putting the ranges here rather than in the route
+ * means the worker enforces exactly what the form offered, and a budget stored
+ * before a range changed is still checkable.
+ *
+ * The upper bounds are deliberately conservative: this app is developed against
+ * a small prepaid quota, and a text field that accepts `100000` for maxCostUsd
+ * is a footgun with no upside.
+ */
+export const BUDGET_FIELDS = [
+  { key: "maxTurns", label: "Max turns", min: 1, max: 200, integer: true },
+  { key: "maxCostUsd", label: "Max cost (USD)", min: 0.01, max: 50, integer: false },
+  { key: "wallClockMs", label: "Wall clock (ms)", min: 30_000, max: 4 * 60 * 60 * 1000, integer: true },
+] as const satisfies ReadonlyArray<{
+  key: keyof RunBudget;
+  label: string;
+  min: number;
+  max: number;
+  integer: boolean;
+}>;
+
+/** Null when the budget is usable; otherwise the first problem, phrased for a human. */
+export function budgetProblem(budget: RunBudget): string | null {
+  for (const field of BUDGET_FIELDS) {
+    const value = budget[field.key];
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return `${field.label} must be a number.`;
+    }
+    if (field.integer && !Number.isInteger(value)) {
+      return `${field.label} must be a whole number.`;
+    }
+    if (value < field.min || value > field.max) {
+      return `${field.label} must be between ${field.min} and ${field.max}.`;
+    }
+  }
   return null;
 }

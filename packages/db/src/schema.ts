@@ -32,6 +32,20 @@ export const settings = pgTable("settings", {
   openaiKeyHint: text("openai_key_hint"),
   defaultModel: text("default_model").notNull().default("gpt-5"),
   maxConcurrentSandboxes: integer("max_concurrent_sandboxes").notNull().default(3),
+  /**
+   * The run bounds (PLAN.md §3.4), added in milestone 10. They live here rather
+   * than in the worker's environment for the same reason `default_model` does:
+   * a ceiling you cannot see or change without editing a file and restarting a
+   * process is not a budget, it is a constant. Defaults mirror
+   * `DEFAULT_BUDGET` in @codex-clone/core -- a run with no settings row is
+   * bounded identically to one with a freshly saved default.
+   *
+   * These are the DEFAULT for every run, not a per-task override: the gateway
+   * resolves them once per run, so an edit lands on the next run.
+   */
+  budgetMaxTurns: integer("budget_max_turns").notNull().default(40),
+  budgetMaxCostUsd: doublePrecision("budget_max_cost_usd").notNull().default(1),
+  budgetWallClockMs: integer("budget_wall_clock_ms").notNull().default(1_200_000),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -101,6 +115,16 @@ export const runs = pgTable(
     /** SandboxHandle.id -- opaque, provider-agnostic. */
     sandboxId: text("sandbox_id"),
     stopReason: text("stop_reason"),
+    /**
+     * Which bound stopped this run, or null. Added in milestone 10.
+     *
+     * Null is the honest answer for every run that was not stopped by a budget,
+     * and that includes a CANCELLED one: a run a person stopped must never be
+     * reported as a budget breach, and deriving that after the fact from
+     * timings and token counts is exactly how it came to be reported as one.
+     * The run loop knows, so the run loop records it.
+     */
+    budgetBreach: text("budget_breach", { enum: ["max_turns", "max_cost", "wall_clock"] }),
     turns: integer("turns").notNull().default(0),
     inputTokens: integer("input_tokens").notNull().default(0),
     /** Subset of inputTokens served from the prompt cache; reported by the gateway. */

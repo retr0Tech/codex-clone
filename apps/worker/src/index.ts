@@ -160,7 +160,9 @@ async function main(): Promise<void> {
     socketPath: config.gatewaySocketPath,
     credentials,
     upstream: new OpenAiUpstream(),
-    budget: config.budget,
+    // Read from Settings once per run, falling back to the built-in default.
+    // The budget is a knob a user can move, not a constant compiled in.
+    budget: () => credentials.runBudget(),
     onError: (message) => console.error(`[gateway] ${redact(message)}`),
     // The one thing broadcast but never persisted. The durable `message` the
     // agent emits at end of turn supersedes it (PLAN.md §3.6).
@@ -188,6 +190,9 @@ async function main(): Promise<void> {
     meters: gateway.meters,
     githubToken: () => credentials.getGithubToken(),
     model: () => credentials.defaultModel(),
+    // The same bounds the gateway meters against, so the host's hard wall-clock
+    // deadline and the meter's soft one cannot drift apart.
+    budget: () => credentials.runBudget(),
     config: {
       image: config.agentImage,
       gatewaySocketPath: config.gatewaySocketPath,
