@@ -1,0 +1,1 @@
+ALTER TABLE "scheduled_jobs" ADD COLUMN "base_branch" text DEFAULT 'main' NOT NULL;
