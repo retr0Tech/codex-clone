@@ -12,6 +12,7 @@ import { EncryptedCredentialStore } from "./credentials.js";
 import { OpenAiUpstream } from "./gateway/openai-upstream.js";
 import { GatewayServer } from "./gateway/server.js";
 import { EventHub } from "./hub/server.js";
+import { PublishError, publishTask } from "./runner/publish.js";
 import { RunQueue } from "./runner/queue.js";
 import { recordUsage } from "./runner/run-state.js";
 import type { SupervisorDeps } from "./runner/supervisor.js";
@@ -62,12 +63,49 @@ async function main(): Promise<void> {
   // precisely so cancel can ride it, but the thing that does the stopping is
   // the queue, which owns the run's controller and its container handle.
   let cancelRun: (runId: string) => Promise<boolean> = () => Promise.resolve(false);
+  const docker = new Docker({ socketPath: config.dockerSocket });
+  const publishDeps = {
+    db,
+    docker,
+    githubToken: () => credentials.getGithubToken(),
+    config: { image: config.agentImage, dataDir: config.dataDir },
+    log: (message: string) => console.log(redact(message)),
+  };
+
   const hub = new EventHub({
     db,
     port: config.wsPort,
     host: config.bindHost,
     onCancel: (runId) => cancelRun(runId),
     log: (message) => console.log(redact(message)),
+    routes: {
+      // Committing and pushing needs the workspace VOLUME, which only this
+      // process can reach -- and the PAT, which never leaves it. The web app
+      // proxies here server-side.
+      "POST /control/publish": async (body) => {
+        const input = body as { taskId?: unknown; openPullRequest?: unknown; title?: unknown; body?: unknown };
+        if (typeof input.taskId !== "string" || input.taskId === "") {
+          return { status: 400, body: { error: "taskId is required" } };
+        }
+        // Publishing rewrites .git inside the volume; doing that under a live
+        // agent would race the thing that is writing the working tree.
+        if (queue.isRunning(input.taskId)) {
+          return { status: 409, body: { error: "this task has a run in flight; wait for it to finish" } };
+        }
+        try {
+          const result = await publishTask(publishDeps, input.taskId, {
+            openPullRequest: input.openPullRequest === true,
+            ...(typeof input.title === "string" ? { title: input.title } : {}),
+            ...(typeof input.body === "string" ? { body: input.body } : {}),
+          });
+          return { status: 200, body: result };
+        } catch (error) {
+          const message = redact(error instanceof Error ? error.message : String(error));
+          console.warn(`[worker] publish failed: ${message}`);
+          return { status: error instanceof PublishError ? 400 : 500, body: { error: message } };
+        }
+      },
+    },
   });
 
   // Milestone 4: the model gateway. It holds the OpenAI key so the sandbox
@@ -95,7 +133,7 @@ async function main(): Promise<void> {
 
   const deps: SupervisorDeps = {
     db,
-    docker: new Docker({ socketPath: config.dockerSocket }),
+    docker,
     sandboxes,
     mirrors: new MirrorManager({ dataDir: config.dataDir }),
     meters: gateway.meters,

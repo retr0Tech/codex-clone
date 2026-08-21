@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState, type KeyboardEvent } from "react";
+import { useRouter } from "next/navigation";
 import { isTerminal, transcriptItems } from "../lib/eventReducer";
 import { useTranscriptStream, type ConnectionState } from "../lib/useTranscriptStream";
 import type { RunView, TaskView } from "../lib/types";
@@ -31,8 +32,13 @@ type Tab = "transcript" | "diff";
  * because the stream is ahead of anything a page render could have read.
  */
 export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunView[]; wsUrl: string }) {
+  const router = useRouter();
   const [tab, setTab] = useState<Tab>("transcript");
   const [followUp, setFollowUp] = useState("");
+  const [sending, setSending] = useState(false);
+  const [publishing, setPublishing] = useState<null | "push" | "pr">(null);
+  const [publish, setPublish] = useState<PublishState | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const stream = useTranscriptStream({ taskId: task.id, wsUrl });
   const { state } = stream;
@@ -53,6 +59,77 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
       : 0;
 
   const spent = runs.reduce((total, run) => total + run.costUsd, 0);
+
+  /**
+   * A follow-up is a NEW run against the same warm workspace, not a mutation of
+   * the last one. The transcript stays append-only, its events continue in the
+   * same seq space, and the socket is already subscribed -- so the new run's
+   * first frame simply arrives. `router.refresh()` re-reads the server metadata
+   * (run count, branch) without touching the stream.
+   */
+  const sendFollowUp = useCallback(async () => {
+    const prompt = followUp.trim();
+    if (prompt === "" || sending || running) return;
+    setSending(true);
+    setActionError(null);
+    try {
+      const response = await fetch(`/api/tasks/${encodeURIComponent(task.id)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      const body = (await response.json()) as { runId?: string; error?: string };
+      if (!response.ok) {
+        setActionError(body.error ?? `the follow-up failed with ${response.status}`);
+        return;
+      }
+      setFollowUp("");
+      router.refresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSending(false);
+    }
+  }, [followUp, sending, running, task.id, router]);
+
+  /**
+   * Push, and optionally open a pull request. Both are host-side: the branch is
+   * committed and pushed from the worker with the stored PAT, and the container
+   * that produced the work never had a credential to do it itself.
+   */
+  const runPublish = useCallback(
+    async (openPullRequest: boolean) => {
+      if (publishing || running) return;
+      setPublishing(openPullRequest ? "pr" : "push");
+      setActionError(null);
+      try {
+        const response = await fetch(`/api/tasks/${encodeURIComponent(task.id)}/publish`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ openPullRequest }),
+        });
+        const body = (await response.json()) as PublishState & { error?: string };
+        if (!response.ok) {
+          setActionError(body.error ?? `publishing failed with ${response.status}`);
+          return;
+        }
+        setPublish(body);
+        router.refresh();
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setPublishing(null);
+      }
+    },
+    [publishing, running, task.id, router],
+  );
+
+  function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      void sendFollowUp();
+    }
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -96,6 +173,12 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
           </div>
 
           {stopReason ? <p className="mt-2 text-[12.5px] text-fg-muted">{stopReason}</p> : null}
+          {actionError ? (
+            <p className="mt-2 rounded-md border border-danger/40 bg-danger-soft px-2.5 py-1.5 text-[12px] text-danger">
+              {actionError}
+            </p>
+          ) : null}
+          {publish ? <PublishBanner publish={publish} /> : null}
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <Segmented<Tab>
@@ -120,11 +203,29 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
 
             <span className="h-px flex-1" />
 
-            <Button size="sm" variant="secondary" disabled title="Wired up in milestone 7">
-              Push branch
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => void runPublish(false)}
+              disabled={publishing !== null || running || !task.workBranch}
+              title={
+                running
+                  ? "Wait for the run to finish: committing rewrites .git in the workspace volume"
+                  : !task.workBranch
+                    ? "Run the task once first — there is no workspace to push yet"
+                    : "Commits the workspace and pushes the branch from the host, using the stored PAT"
+              }
+            >
+              {publishing === "push" ? "Pushing…" : "Push branch"}
             </Button>
-            <Button size="sm" variant="secondary" disabled title="Wired up in milestone 7">
-              Open PR
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => void runPublish(true)}
+              disabled={publishing !== null || running || !task.workBranch}
+              title="Pushes the branch, then opens a pull request against the base branch"
+            >
+              {publishing === "pr" ? "Opening…" : "Open PR"}
             </Button>
             {running && runId ? (
               <Button
@@ -215,10 +316,13 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
               rows={2}
               value={followUp}
               onChange={(e) => setFollowUp(e.target.value)}
+              onKeyDown={onComposerKeyDown}
               placeholder={
-                task.mode === "ask"
-                  ? "Ask a follow-up. Ask mode mounts the workspace read-only."
-                  : "Send a follow-up turn. The container stays warm for 15 minutes."
+                running
+                  ? "A run is in flight. The follow-up queues behind it."
+                  : task.mode === "ask"
+                    ? "Ask a follow-up. Ask mode mounts the workspace read-only."
+                    : "Send a follow-up turn. It reuses this task's warm workspace."
               }
               className="border-0 bg-transparent px-1.5 py-1 focus-visible:outline-none"
             />
@@ -231,16 +335,62 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
               <Button
                 size="sm"
                 variant="primary"
-                disabled
-                title="Follow-up turns land in milestone 7"
+                onClick={() => void sendFollowUp()}
+                disabled={followUp.trim().length === 0 || sending || running}
+                title={
+                  running
+                    ? "This task already has a run in flight; one run per task at a time"
+                    : "Queues a new run against the same workspace, continuing this task"
+                }
                 className={cn(followUp.trim().length === 0 && "opacity-45")}
               >
-                Send
+                {sending ? "Queueing…" : "Send"}
               </Button>
             </div>
           </div>
         </div>
       </footer>
+    </div>
+  );
+}
+
+interface PublishState {
+  branch: string;
+  commit: string | null;
+  filesChanged: number;
+  branchUrl: string;
+  compareUrl: string;
+  pullRequest: { number: number; url: string; created: boolean } | null;
+}
+
+/**
+ * Where the work ended up.
+ *
+ * The whole point of the slice is a branch you can open as a pull request, so
+ * the URLs are the result -- not a toast that disappears.
+ */
+function PublishBanner({ publish }: { publish: PublishState }) {
+  return (
+    <div className="mt-2 rounded-md border border-ok/40 bg-ok-soft px-2.5 py-2 text-[12px] text-ok">
+      <p>
+        Pushed <span className="font-mono">{publish.branch}</span>
+        {publish.commit ? <span className="font-mono"> @ {shortSha(publish.commit)}</span> : null} ·{" "}
+        {publish.filesChanged} file{publish.filesChanged === 1 ? "" : "s"}
+      </p>
+      <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <a className="underline underline-offset-2" href={publish.branchUrl} target="_blank" rel="noreferrer">
+          View branch
+        </a>
+        {publish.pullRequest ? (
+          <a className="underline underline-offset-2" href={publish.pullRequest.url} target="_blank" rel="noreferrer">
+            {publish.pullRequest.created ? "Pull request" : "Existing pull request"} #{publish.pullRequest.number}
+          </a>
+        ) : (
+          <a className="underline underline-offset-2" href={publish.compareUrl} target="_blank" rel="noreferrer">
+            Open a pull request on GitHub
+          </a>
+        )}
+      </p>
     </div>
   );
 }

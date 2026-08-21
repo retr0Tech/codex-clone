@@ -10,7 +10,7 @@
  * dependency and can be tested with nothing but a fake Octokit.
  */
 
-import { desc, eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { repos, type Database } from "@codex-clone/db";
 
 import type { RepoSummary } from "./client.js";
@@ -61,8 +61,20 @@ export async function persistRepos(db: Database, summaries: RepoSummary[]): Prom
   return summaries.length;
 }
 
+/**
+ * Most-recently-mirrored first, then alphabetical.
+ *
+ * `NULLS LAST` is the whole point of this ordering and was missing: Postgres
+ * sorts nulls FIRST on a descending sort, so every repository the user had
+ * never touched outranked the one they were working in, and the picker opened
+ * on a stranger. A mirror exists exactly when we have run a task against that
+ * repo, which makes it the best "you were here recently" signal we have.
+ */
 export async function listPersistedRepos(db: Database): Promise<PersistedRepo[]> {
-  const rows = await db.select().from(repos).orderBy(desc(repos.mirrorFetchedAt), repos.fullName);
+  const rows = await db
+    .select()
+    .from(repos)
+    .orderBy(sql`${repos.mirrorFetchedAt} desc nulls last`, repos.fullName);
   return rows.map(toPersisted);
 }
 

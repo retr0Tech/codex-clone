@@ -1,4 +1,4 @@
-import type { IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { desc, eq } from "drizzle-orm";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { AnyEventRow, ServerFrame } from "@codex-clone/core";
@@ -41,7 +41,19 @@ export interface EventHubOptions {
   log?: (message: string) => void;
   /** Dead-peer detection. A tab closed by force never sends a close frame. */
   heartbeatMs?: number;
+  /**
+   * Control-API handlers, keyed `"<METHOD> <path>"`.
+   *
+   * These exist because some actions need the workspace VOLUME -- deriving a
+   * diff, committing and pushing a branch -- and the worker is the only process
+   * that can reach one. The web app proxies to them server-side so the browser
+   * still talks to exactly one origin.
+   */
+  routes?: Record<string, (body: unknown) => Promise<{ status: number; body: unknown }>>;
 }
+
+/** A control request is a couple of ids; anything larger is a bug or an attack. */
+export const MAX_CONTROL_BODY_BYTES = 64 * 1024;
 
 interface Subscription {
   socket: WebSocket;
@@ -58,6 +70,7 @@ export const DEFAULT_HEARTBEAT_MS = 30_000;
 
 export class EventHub {
   #wss: WebSocketServer | null = null;
+  #http: Server | null = null;
   #heartbeat: NodeJS.Timeout | null = null;
   readonly #byTask = new Map<string, Set<Subscription>>();
   readonly #subs = new Map<WebSocket, Subscription>();
@@ -82,23 +95,36 @@ export class EventHub {
 
   /** The bound port. Differs from the requested one only when it was 0. */
   get port(): number {
-    const address = this.#wss?.address();
+    const address = this.#http?.address();
     return typeof address === "object" && address !== null ? address.port : this.options.port;
   }
 
   async listen(): Promise<void> {
+    // One HTTP server carrying both protocols: the WebSocket the browser
+    // subscribes on, and the control API the web app calls for actions that
+    // need the workspace volume (milestone 7's push). The worker owns
+    // everything with a lifecycle, so it is the only process that can reach a
+    // Docker volume -- and the web app stays a stock App Router process with no
+    // custom server of its own.
+    const http = createServer((req, res) => {
+      void this.#onRequest(req, res).catch((err: unknown) => {
+        this.#log(`[hub] control handler crashed: ${redact(String(err))}`);
+        if (!res.headersSent) res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "internal error" }));
+      });
+    });
+
     const wss = new WebSocketServer({
-      port: this.options.port,
-      host: this.options.host,
+      server: http,
       // A browser sending megabytes at this is a bug or an attack; either way
       // it must not be able to grow the worker's heap.
       maxPayload: MAX_CLIENT_FRAME_BYTES,
     });
 
     await new Promise<void>((resolve, reject) => {
-      wss.once("error", reject);
-      wss.once("listening", () => {
-        wss.removeListener("error", reject);
+      http.once("error", reject);
+      http.listen(this.options.port, this.options.host, () => {
+        http.removeListener("error", reject);
         resolve();
       });
     });
@@ -106,6 +132,7 @@ export class EventHub {
     wss.on("connection", (socket, request) => this.#onConnection(socket, request));
     wss.on("error", (err: Error) => this.#log(`[hub] server error: ${redact(err.message)}`));
 
+    this.#http = http;
     this.#wss = wss;
     this.#heartbeat = setInterval(() => this.#sweep(), this.options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS);
     // The hub must not be the reason the process refuses to exit.
@@ -117,8 +144,10 @@ export class EventHub {
     this.#heartbeat = null;
 
     const wss = this.#wss;
+    const http = this.#http;
     this.#wss = null;
-    if (!wss) return;
+    this.#http = null;
+    if (!wss || !http) return;
 
     for (const socket of this.#subs.keys()) socket.close(1001, "worker shutting down");
     this.#subs.clear();
@@ -126,14 +155,55 @@ export class EventHub {
     this.#runToTask.clear();
 
     await new Promise<void>((resolve) => {
-      wss.close(() => resolve());
+      wss.close(() => http.close(() => resolve()));
       // `close()` waits for every client to go; a half-closed browser could
       // otherwise hold shutdown open indefinitely.
       setTimeout(() => {
         for (const client of wss.clients) client.terminate();
+        http.closeAllConnections?.();
         resolve();
       }, 2_000).unref();
     });
+  }
+
+  /**
+   * The control API.
+   *
+   * Requests must be JSON, and that is load-bearing rather than tidy: a
+   * cross-origin `fetch` carrying `content-type: application/json` triggers a
+   * CORS preflight, and this server answers no CORS headers at all -- so a page
+   * on some other site cannot reach these endpoints even though they listen on
+   * loopback with no auth. The web app calls them server-side, where the
+   * browser's rules do not apply.
+   */
+  async #onRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const send = (status: number, body: unknown) => {
+      res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (req.method === "GET" && url.pathname === "/healthz") {
+      return send(200, { ok: true, subscribers: this.subscriberCount, activeRuns: this.#runToTask.size });
+    }
+
+    const route = this.options.routes?.[`${req.method ?? "GET"} ${url.pathname}`];
+    if (!route) return send(404, { error: "not found" });
+
+    if (!(req.headers["content-type"] ?? "").includes("application/json")) {
+      return send(415, { error: "requests to the control API must be application/json" });
+    }
+
+    let body: unknown = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim() !== "") body = JSON.parse(raw);
+    } catch (err) {
+      return send(400, { error: `body is not valid JSON: ${redact(String(err))}` });
+    }
+
+    const result = await route(body);
+    return send(result.status, result.body);
   }
 
   /** Teaches the hub which task a run belongs to, for delta routing. */
@@ -325,6 +395,25 @@ export class EventHub {
   #log(message: string): void {
     this.options.log?.(message);
   }
+}
+
+/** Capped: a runaway client must not be able to grow the worker's heap. */
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_CONTROL_BODY_BYTES) {
+        reject(new Error(`body exceeded ${MAX_CONTROL_BODY_BYTES} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
 }
 
 /** The task's most recent run, for the hello frame's cursor. */
