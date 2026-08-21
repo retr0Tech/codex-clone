@@ -48,9 +48,16 @@ export interface RunBudget {
   wallClockMs: number;
 }
 
+/**
+ * A typical successful run costs a fraction of a cent, so the cost ceiling
+ * exists to bound a RUNAWAY run, not a normal one. It is set well below the
+ * kind of prepaid quota this app is developed against, so that a single
+ * pathological run -- an agent looping on a failing test -- cannot consume a
+ * meaningful share of the budget before the wind-down fires.
+ */
 export const DEFAULT_BUDGET: RunBudget = {
   maxTurns: 40,
-  maxCostUsd: 5,
+  maxCostUsd: 1,
   wallClockMs: 20 * 60 * 1000,
 };
 
