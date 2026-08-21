@@ -55,6 +55,13 @@ export const config = {
   encryptionKey: env("APP_ENCRYPTION_KEY"),
 
   agentImage: env("AGENT_IMAGE", "codex-clone/agent:dev"),
+  /**
+   * Shared package-manager cache, mounted into every sandbox at /cache so a
+   * repeated `npm ci` is warm (PLAN.md §3.7). This is a known cross-workspace
+   * channel -- a hostile agent can poison it for the next task -- and the
+   * production fix is a per-tenant namespace. Set to empty to disable it.
+   */
+  cacheVolumeName: raw("CACHE_VOLUME_NAME") ?? "codex-clone-cache",
   maxConcurrentSandboxes: num("MAX_CONCURRENT_SANDBOXES", 3),
   /** Container is reaped to the cold snapshot store after this much idle time. */
   idleReapMs: num("IDLE_REAP_MS", 15 * 60 * 1000),

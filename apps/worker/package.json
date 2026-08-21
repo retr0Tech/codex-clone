@@ -14,8 +14,11 @@
   "dependencies": {
     "@codex-clone/core": "workspace:*",
     "@codex-clone/db": "workspace:*",
+    "@codex-clone/github": "workspace:*",
     "@codex-clone/sandbox-docker": "workspace:*",
+    "@codex-clone/secrets": "workspace:*",
     "dockerode": "^4.0.4",
+    "drizzle-orm": "^0.38.4",
     "ws": "^8.18.0"
   },
   "devDependencies": {
