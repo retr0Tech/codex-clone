@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { ReactNode } from "react";
 import type { TaskView } from "../lib/types";
 import { Badge } from "./ui/Badge";
 import { RelativeTime } from "./RelativeTime";
@@ -15,17 +16,30 @@ import { EmptyState } from "./ui/misc";
  * is in flight the task status wins, since that is the one that says whether it
  * is waiting for a sandbox slot or already has one.
  */
-export function TaskRow({ task, showArchived = false }: { task: TaskView; showArchived?: boolean }) {
+export function TaskRow({
+  task,
+  showArchived = false,
+  action,
+}: {
+  task: TaskView;
+  showArchived?: boolean;
+  /**
+   * Rendered OUTSIDE the row's link. A button nested inside an anchor is not
+   * valid HTML and swallows the click on the way past, so the action sits
+   * beside the link rather than within it.
+   */
+  action?: ReactNode;
+}) {
   const runMeta = task.latestRun ? STATUS_META[task.latestRun.status] : null;
   const taskMeta = TASK_STATUS_META[task.status];
   const inFlight = task.status === "queued" || task.status === "running";
 
   return (
-    <li>
+    <li className="flex items-center gap-2 pr-3 transition-colors hover:bg-surface-2">
       <Link
         href={`/tasks/${task.id}`}
         className={cn(
-          "group flex flex-col gap-1.5 px-4 py-3 transition-colors hover:bg-surface-2",
+          "group flex min-w-0 flex-1 flex-col gap-1.5 px-4 py-3",
           "sm:flex-row sm:items-center sm:gap-4",
         )}
       >
@@ -60,6 +74,7 @@ export function TaskRow({ task, showArchived = false }: { task: TaskView; showAr
           />
         </div>
       </Link>
+      {action ? <div className="shrink-0">{action}</div> : null}
     </li>
   );
 }
@@ -68,10 +83,13 @@ export function TaskList({
   tasks,
   showArchived = false,
   empty,
+  action,
 }: {
   tasks: TaskView[];
   showArchived?: boolean;
   empty?: { title: string; body: string };
+  /** Per-row action, e.g. Restore on the /archived page. */
+  action?: (task: TaskView) => ReactNode;
 }) {
   if (tasks.length === 0 && empty) {
     return <EmptyState title={empty.title} body={empty.body} />;
@@ -79,7 +97,7 @@ export function TaskList({
   return (
     <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-surface">
       {tasks.map((task) => (
-        <TaskRow key={task.id} task={task} showArchived={showArchived} />
+        <TaskRow key={task.id} task={task} showArchived={showArchived} action={action?.(task)} />
       ))}
     </ul>
   );

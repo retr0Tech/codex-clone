@@ -6,6 +6,7 @@ import { isTerminal, transcriptItems } from "../lib/eventReducer";
 import { useTranscriptStream, type ConnectionState } from "../lib/useTranscriptStream";
 import type { RunView, TaskView } from "../lib/types";
 import { StickToBottom } from "./StickToBottom";
+import { ArchiveActions } from "./archive/ArchiveActions";
 import { Transcript } from "./transcript/Transcript";
 import { DiffCard, DiffView } from "./diff/DiffView";
 import { Badge } from "./ui/Badge";
@@ -39,6 +40,7 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
   const [publishing, setPublishing] = useState<null | "push" | "pr">(null);
   const [publish, setPublish] = useState<PublishState | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const stream = useTranscriptStream({ taskId: task.id, wsUrl });
   const { state } = stream;
@@ -50,6 +52,9 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
   const status = state.events.length > 0 ? state.status : (latestRun?.status ?? "queued");
   const statusMeta = STATUS_META[status];
   const running = !isTerminal(status);
+  // An archived task is not claimable (see claim.ts), so a follow-up would sit
+  // queued forever. Say so rather than letting the composer take one.
+  const archived = task.status === "archived";
   const stopReason = state.stopReason ?? latestRun?.stopReason ?? null;
   const runId = state.runId ?? latestRun?.id ?? null;
 
@@ -178,6 +183,11 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
               {actionError}
             </p>
           ) : null}
+          {notice ? (
+            <p className="mt-2 rounded-md border border-border bg-surface-2 px-2.5 py-1.5 text-[12px] text-fg-muted">
+              {notice}
+            </p>
+          ) : null}
           {publish ? <PublishBanner publish={publish} /> : null}
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -227,6 +237,9 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
             >
               {publishing === "pr" ? "Opening…" : "Open PR"}
             </Button>
+            {/* Milestone 8. Archiving is a status change, not a deletion: the
+                transcript is kept and the workspace moves to the cold tier. */}
+            <ArchiveActions task={task} running={running} onNotice={setNotice} onError={setActionError} />
             {running && runId ? (
               <Button
                 size="sm"
@@ -318,11 +331,13 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
               onChange={(e) => setFollowUp(e.target.value)}
               onKeyDown={onComposerKeyDown}
               placeholder={
-                running
-                  ? "A run is in flight. The follow-up queues behind it."
-                  : task.mode === "ask"
-                    ? "Ask a follow-up. Ask mode mounts the workspace read-only."
-                    : "Send a follow-up turn. It reuses this task's warm workspace."
+                archived
+                  ? "This task is archived. Restore it to send another turn."
+                  : running
+                    ? "A run is in flight. The follow-up queues behind it."
+                    : task.mode === "ask"
+                      ? "Ask a follow-up. Ask mode mounts the workspace read-only."
+                      : "Send a follow-up turn. It reuses this task's warm workspace."
               }
               className="border-0 bg-transparent px-1.5 py-1 focus-visible:outline-none"
             />
@@ -336,11 +351,13 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
                 size="sm"
                 variant="primary"
                 onClick={() => void sendFollowUp()}
-                disabled={followUp.trim().length === 0 || sending || running}
+                disabled={followUp.trim().length === 0 || sending || running || archived}
                 title={
-                  running
-                    ? "This task already has a run in flight; one run per task at a time"
-                    : "Queues a new run against the same workspace, continuing this task"
+                  archived
+                    ? "Archived tasks are not claimable. Restore it first; the workspace comes back from its cold snapshot."
+                    : running
+                      ? "This task already has a run in flight; one run per task at a time"
+                      : "Queues a new run against the same workspace, continuing this task"
                 }
                 className={cn(followUp.trim().length === 0 && "opacity-45")}
               >
