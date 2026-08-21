@@ -428,6 +428,54 @@ Point `DOCKER_SOCKET` at `$HOME/.docker/run/docker.sock`.
 **Database connection refused** — run `pnpm db:up` and give Postgres a few
 seconds; the container has a healthcheck.
 
+## Working on several changes at once
+
+The repository is wired for [Conductor](https://www.conductor.build/), which
+runs each task in its own git worktree. `.conductor/settings.toml` points at
+three scripts, and between them they let several workspaces run **at the same
+time** without touching each other's state:
+
+| | |
+|---|---|
+| `.conductor/setup.sh` | installs (the root `prepare` script builds the packages), allocates ports, creates the workspace's database, migrates it, writes its `.env.local` |
+| `.conductor/run.sh` | starts web + worker on the ports setup allocated |
+| `.conductor/archive.sh` | drops the database, data dir, containers, volumes and port reservations when the workspace is deleted |
+
+Each workspace gets its own:
+
+| Resource | Per workspace |
+|---|---|
+| Postgres database | `codexclone_<workspace>` in the **one shared** server on `:5432` |
+| Web port | allocated, recorded in `.env.local` as `WEB_PORT` |
+| Worker WebSocket port | allocated, with `NEXT_PUBLIC_WS_URL` kept in step |
+| `CODEX_DATA_DIR` | `~/.codexclone/workspaces/<workspace>` — mirrors, snapshots, job specs, and the **gateway unix socket**, which two workers cannot share |
+| `CODEX_WORKSPACE_ID` | labels the workspace's containers, so one worker's boot reconciliation cannot mistake another's live sandboxes for orphans and destroy them |
+
+Ports are **allocated, not hashed**: each candidate is claimed by an atomic
+`mkdir` under `~/.codexclone/conductor/ports/<port>`, so two setups racing
+cannot both take 3001, and a workspace that is set up but not running still
+holds its port. 3000 and 8787 are never handed out — they belong to a plain
+`pnpm dev`. Re-running setup reuses what it already allocated.
+
+Docker sandbox containers and `ws-*` volumes are named from task ids, which are
+random UUIDs, so those names never collide across workspaces and are left
+alone. The package-manager cache volume stays shared on purpose.
+
+**`APP_ENCRYPTION_KEY` is reused** from the parent checkout's `.env.local` if
+there is one, so a credential you saved once still decrypts. If there is
+nothing to reuse, setup generates a key and says so in a box you cannot miss —
+credentials encrypted under a different key are not recoverable, so that is not
+a thing to discover later. Each workspace has its own database either way, so
+Settings starts empty and you will enter the PAT and the API key again.
+
+The workspace's database is created empty and then migrated with the branch's
+own migrations, so it lands on the same schema version as everything else in
+the checkout rather than one behind.
+
+Nothing here is Conductor-specific: the scripts fall back to `git` when
+Conductor's environment variables are absent, so a plain `git worktree add`
+followed by `./.conductor/setup.sh` works the same way.
+
 ## Development
 
 ```bash

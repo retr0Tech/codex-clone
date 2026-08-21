@@ -1,5 +1,5 @@
 import type Docker from "dockerode";
-import { LABEL_KIND, LABEL_MANAGED, LABEL_TASK_ID, MANAGED_VALUE, managedFilter } from "./labels.js";
+import { LABEL_KIND, LABEL_MANAGED, LABEL_TASK_ID, LABEL_WORKSPACE, MANAGED_VALUE, managedFilter } from "./labels.js";
 
 /**
  * The hot tier of the two-tier workspace store (PLAN.md section 3.2).
@@ -20,13 +20,17 @@ export function workspaceVolumeName(taskId: string): string {
 export async function ensureVolume(
   docker: Docker,
   name: string,
-  opts: { kind: string; taskId?: string } = { kind: VOLUME_KIND_WORKSPACE },
+  opts: { kind: string; taskId?: string; workspaceId?: string } = { kind: VOLUME_KIND_WORKSPACE },
 ): Promise<void> {
   const labels: Record<string, string> = {
     [LABEL_MANAGED]: MANAGED_VALUE,
     [LABEL_KIND]: opts.kind,
   };
   if (opts.taskId) labels[LABEL_TASK_ID] = opts.taskId;
+  // A `ws-<taskId>` name can never collide across workspaces -- task ids are
+  // random UUIDs -- but once a workspace is deleted nothing can name its
+  // volumes any more. The label is what lets the archive script find them.
+  if (opts.workspaceId) labels[LABEL_WORKSPACE] = opts.workspaceId;
   // createVolume is idempotent for an existing name; it returns the existing
   // volume rather than erroring, so this doubles as "ensure".
   await docker.createVolume({ Name: name, Labels: labels });
