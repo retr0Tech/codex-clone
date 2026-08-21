@@ -9,9 +9,11 @@ rewriting the orchestrator.
 > a branch, describe a change, and watch reasoning, tool calls and a real diff
 > stream in live — then push the branch and open a pull request, all from the
 > host. The same run loop is also on a schedule: a cron expression with a
-> timezone gets a fresh container on a cadence and pushes what it produced. See
-> [The end-to-end flow](#the-end-to-end-flow) to follow it yourself, and
-> [What works today](#what-works-today) for what is and is not built.
+> timezone gets a fresh container on a cadence and pushes what it produced.
+> Every run is metered and bounded, and both the spend and the bounds are
+> visible. See [The end-to-end flow](#the-end-to-end-flow) to follow it
+> yourself, [What works today](#what-works-today) for what is built, and
+> [Known gaps](#known-gaps) for what is deliberately not.
 
 ## Requirements
 
@@ -56,11 +58,12 @@ to create a task.
 pnpm build && pnpm typecheck && pnpm lint && pnpm test
 ```
 
-Expect **421 tests, 0 failures**, in roughly 25 seconds. Two tests skip unless
+Expect **482 tests, 0 failures**, in roughly 40 seconds, with Docker and
+Postgres up and the agent image built — the integration suites skip otherwise,
+with a reason, and the count is correspondingly lower. Two tests skip unless
 `ripgrep` is installed on the host (`brew install ripgrep`); it is baked into
-the agent image, so this affects only host-side runs. The Docker- and
-Postgres-dependent suites skip with a reason when either is unavailable, and
-**no test ever reaches a model provider** — every one of them runs against
+the agent image, so this affects only host-side runs.
+**No test ever reaches a model provider** — every one of them runs against
 `FakeUpstream`, which is the point of having pushed the model call out to the
 host in the first place.
 
@@ -164,7 +167,25 @@ A real run of exactly that, streamed live:
   PR rather than failing. The resulting URLs appear in the task header.
 - **Cancel** — closes the gateway meter first, so no further model call is
   admitted even mid-turn, then SIGTERMs with a grace period. Partial work
-  survives, because the workspace volume is the live state.
+  survives, because the workspace volume is the live state. The agent gets one
+  final turn to commit what it has, so the button reads **Cancelling…** for a
+  few seconds rather than pretending the stop was instant — and a run you
+  stopped is recorded as `cancelled` with **no** budget breach, however close to
+  a ceiling it happened to be.
+- **Run bounds and cost visibility** (`/usage`, and a Usage tab per task) —
+  every run has been metered at the gateway since milestone 4; this is where
+  those figures surface. Turns, input, output, **cached input** and cost, per
+  run and per task, with a bar for each bound showing how close the run came and
+  which one stopped it. Budgets are editable in Settings — turns, cost and wall
+  clock — and are resolved once per run, so an edit lands on the next run and
+  never moves under a run already being measured against it.
+- **Timeouts that actually fire** — the gateway checks the wall clock when a
+  model call arrives, which cannot help an agent wedged inside a tool call that
+  never returns. The host arms its own deadline for the same bound: meter
+  closed, then SIGTERM with the grace period, and the run is recorded
+  `timed_out` rather than sitting on a concurrency slot forever. `timed_out`
+  means the wall clock; `budget_exhausted` means turns or cost. They are
+  different signals and read differently.
 - **Archive and restore, via cold snapshots** — a workspace idle for
   `IDLE_REAP_MS` (15 minutes) is exported to `~/.codexclone/snapshots/<taskId>.tar.zst`
   and its Docker volume is freed; the next turn restores it and carries on.
@@ -183,12 +204,12 @@ A real run of exactly that, streamed live:
   restart and cannot double-fire across workers. See
   [Scheduled jobs](#scheduled-jobs) for what the two awkward cases do.
 - **`/mock/transcript`** — replays a recorded run through the same reducer the
-  socket feeds, including cancellation, budget exhaustion, and a failed setup
-  script. Useful for seeing states a happy run does not produce.
+  socket feeds, including cancellation, budget exhaustion, a wall-clock timeout,
+  and a failed setup script. Useful for seeing states a happy run does not
+  produce.
 
-**Not built:** the cost/budget UI (milestone 10). Every run already meters its
-tokens and cost at the gateway and records them on the `runs` row; what is
-missing is the page that shows them.
+Everything the brief asks for is built. What is deliberately *not* here is
+listed under [Known gaps](#known-gaps).
 
 ## Scheduled jobs
 
@@ -247,6 +268,57 @@ of the design rather than being guarded against: `restoreWorkspace` is keyed on
 is nothing for it to find. The transcript says so in its own words — a scheduled
 run logs `no cold snapshot either; this workspace is new`, and the integration
 test asserts exactly that line.
+
+## Run bounds, cost, and stopping
+
+Three bounds, one place they are enforced, and two ways a run can be stopped
+that must never be confused with each other.
+
+```
+budget: maxTurns 40 │ maxCostUSD 1 │ wallClock 20m      (editable in Settings)
+
+per model call ─▶ gateway meter ─▶ under budget?  forward
+                                   just over?     inject wind-down, ONE more turn
+                                   spent?         refuse
+
+no model call at all ─▶ host deadline at wallClockMs ─▶ close meter ─▶ SIGTERM
+```
+
+**The gateway is the only place budgets live**, because it is the only component
+every model call passes through. The container cannot be trusted to stop itself
+and the worker only sees events, so nothing else can both count and refuse.
+
+**Breaching is not a kill.** The wind-down instruction is injected and the agent
+gets exactly one more turn to commit what it has and explain itself, because a
+hard stop at the moment of breach throws away the most valuable turn of the run.
+Only then is the container SIGTERMed.
+
+**The wall clock needed a second enforcer.** The meter can only check elapsed
+time when a model call arrives, so an agent parked inside a `shell` command that
+never returns trips nothing — and used to hold one of three concurrency slots
+indefinitely. The supervisor therefore arms its own timer for the same bound.
+The polite path still wins when it can; this one exists for when it cannot.
+
+**A cancelled run is never a budget breach.** Cancel and a wall-clock breach take
+the same path — meter closed, then SIGTERM — but they are not the same event,
+and the distinction is carried as *data*, not as prose: `runs.budget_breach` is
+null for a cancelled run, and the refusal the agent receives says `cancelled`
+rather than naming a bound. Deriving it after the fact from turn counts and
+timings is exactly how a run someone stopped at 39 of 40 turns came to be
+reported as one that ran out of budget.
+
+So the terminal statuses mean distinct things, and the UI keeps them distinct:
+
+| Status | What happened |
+|---|---|
+| `cancelled` | A person pressed Cancel. No breach, partial work kept. |
+| `timed_out` | The wall clock ran out. |
+| `budget_exhausted` | The turn or cost ceiling was reached. |
+
+`/usage` and the per-task Usage tab render the figures the gateway wrote as each
+run went — including **cached input tokens**, which bill at roughly a tenth of
+the input rate and were recorded on every run from milestone 4 while being
+displayed nowhere.
 
 ## Architecture
 
@@ -319,6 +391,29 @@ that scrubs them from all log output. Nothing sensitive is committed.
 The worker's model gateway reads the OpenAI key from that same encrypted store
 on every call rather than caching it, so replacing the key in Settings takes
 effect on the next model call instead of on the next restart.
+
+## Known gaps
+
+Things that are deliberately absent rather than overlooked:
+
+- **Budgets are global, not per task.** They are the default every run is
+  measured against, resolved once at run start. Per-task overrides would need a
+  budget column on `tasks` and a `MeterRegistry` that is handed one per run;
+  the registry already accepts a per-run budget, so the remaining work is a
+  column and a form field.
+- **Headroom is shown against the *current* budget.** A bound raised after a run
+  finished makes that run look roomier than it felt. Storing the budget on each
+  run would fix it, at three more columns per run — not worth it here.
+- **No auth, no multi-tenancy, no per-tenant quotas.** Everything binds to
+  `127.0.0.1` and assumes a single local user.
+- **The shared package cache is a cross-workspace channel** (PLAN.md §3.7): a
+  hostile agent can poison it for the next task. Production fix is a per-tenant
+  cache namespace.
+- **Package-registry egress is open.** There is nothing in the container worth
+  exfiltrating, but production wants an allowlist proxy in front of the sandbox.
+- **Model prices are a hand-maintained table** in `apps/worker/src/gateway/pricing.ts`.
+  An unknown model bills at the most expensive known rate rather than at zero,
+  so a stale table under-reports rather than silently disabling the cost budget.
 
 ## Troubleshooting
 

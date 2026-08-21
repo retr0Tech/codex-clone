@@ -423,6 +423,16 @@ async function start(
       prompt: run.prompt,
       baseSha: task.baseSha,
       model: await deps.model(),
+      /**
+       * The runtime's own backstop, kept ONE turn above the gateway's ceiling.
+       *
+       * The gateway grants `maxTurns` forwards plus a final wind-down turn, so
+       * a backstop set to `maxTurns` exactly would cut off the summary turn --
+       * the most valuable one in a run that hit its budget. Deriving it from
+       * the same number is what keeps a raised ceiling in Settings from being
+       * silently capped by a constant compiled into the image.
+       */
+      maxTurns: run.budget.maxTurns + 1,
       ...(setupScript ? { setupScript } : {}),
     },
   };

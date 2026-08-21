@@ -512,9 +512,9 @@ function buildBudgetExhausted(): MockRun {
   b.event(
     "error",
     {
-      code: "budget_exceeded",
+      code: "gateway_refused:max_cost",
       message:
-        "Cost budget of $5.00 reached (spent $5.02 over 27 turns). Injecting a wind-down " +
+        "Cost budget of $1.00 reached (spent $1.02 over 27 turns). Injecting a wind-down " +
         "instruction; the agent gets one final turn to summarise.",
       retryable: false,
     },
@@ -539,7 +539,7 @@ function buildBudgetExhausted(): MockRun {
     "status",
     {
       status: "budget_exhausted",
-      reason: "maxCostUSD $5.00 exhausted after 27 turns. Wind-down turn completed; no diff produced.",
+      reason: "the cost ceiling was reached after 27 turns and $1.0210",
     },
     400,
   );
@@ -552,6 +552,91 @@ function buildBudgetExhausted(): MockRun {
     blurb: "Hit the cost ceiling, got its graceful wind-down turn, and stopped with a reason.",
     status: "budget_exhausted",
     prompt: "Find and fix the flaky test in the queue suite.",
+    events: b.events,
+    frames: b.frames,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* 3b. Timed out — the wall clock, which is NOT the same as running out of     */
+/*     budget: no wind-down turn, because the agent never asked for one.        */
+/* -------------------------------------------------------------------------- */
+
+function buildTimedOut(): MockRun {
+  const b = new RunBuilder("run_7c9d41", "task_slow_build", "2026-08-19T17:22:08.000Z");
+
+  b.event("phase", { phase: "setup" }, 200);
+  b.setup([
+    ["stdout", "$ ./gradlew --no-daemon assemble"],
+    ["stdout", "Starting a Gradle Daemon (subsequent builds will be faster)"],
+    ["stdout", "BUILD SUCCESSFUL in 3m 41s"],
+  ]);
+  b.event("phase", { phase: "agent" }, 260);
+
+  b.event(
+    "reasoning",
+    {
+      text:
+        "The integration suite is the only thing that exercises the code path in " +
+        "question, so I will run it once before changing anything. It is slow, but a " +
+        "change I cannot verify is worse than a slow verification.",
+    },
+    800,
+  );
+
+  b.say(
+    "msg_01",
+    "assistant",
+    "Running the integration suite first so I have a baseline to compare against.",
+  );
+
+  /**
+   * The whole point of this fixture: one tool call that never returns. The
+   * gateway meter checks the wall clock only when a model call arrives, and no
+   * further call ever arrives -- so the host's own deadline is what stops this,
+   * and there is no polite wind-down turn to show.
+   */
+  b.tool(
+    "call_shell_1",
+    "shell",
+    { command: "./gradlew integrationTest --no-daemon", cwd: "/workspace" },
+    {
+      ok: false,
+      output:
+        "> Task :integration:test\n" +
+        "PaymentReconciliationIT > settlesAcrossTimezones STANDARD_OUT\n" +
+        "    waiting for the embedded broker to come up...\n" +
+        "[... no further output for 16 minutes ...]",
+      truncated: true,
+      durationMs: 986_000,
+    },
+  );
+
+  b.event(
+    "error",
+    {
+      code: "gateway_refused:wall_clock",
+      message: "the wall-clock limit of 20m was reached; the sandbox was stopped",
+      retryable: false,
+    },
+    500,
+  );
+  b.event(
+    "status",
+    { status: "timed_out", reason: "the wall-clock limit of 20m was reached; the sandbox was stopped" },
+    300,
+  );
+  b.event("phase", { phase: "done" }, 120);
+
+  return {
+    id: b.runId,
+    taskId: b.taskId,
+    label: "Timed out",
+    blurb:
+      "Wedged inside one tool call, so the gateway meter never fired. The host's wall-clock deadline stopped it — " +
+      "and it reads as timed_out, not as a budget breach.",
+    status: "timed_out",
+    prompt: "Make the payment reconciliation job timezone-safe.",
     events: b.events,
     frames: b.frames,
   };
@@ -674,6 +759,7 @@ export const mockRuns: MockRun[] = [
   buildFollowUp(),
   buildCancelled(),
   buildBudgetExhausted(),
+  buildTimedOut(),
   buildSetupFailed(),
 ];
 

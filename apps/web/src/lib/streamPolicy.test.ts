@@ -6,6 +6,7 @@ import {
   RECONNECT_MAX_MS,
   RECONNECT_MIN_MS,
   advanceCursor,
+  isCancelling,
   openingHello,
   reconnectDelayMs,
   shouldDispatchServerHello,
@@ -131,5 +132,31 @@ describe("reconnect backoff", () => {
     }
     assert.equal(delays.at(-1), RECONNECT_MAX_MS);
     assert.ok(delays.every((d) => d <= RECONNECT_MAX_MS));
+  });
+});
+
+describe("the cancelling state", () => {
+  it("holds from the click until the run actually stops", () => {
+    // The gateway meter closes at once, but the agent still gets one final turn
+    // to commit what it has -- so this state lasts seconds and has to be shown.
+    assert.equal(isCancelling("run_1", "run_1", false), true);
+    assert.equal(isCancelling("run_1", "run_1", true), false);
+  });
+
+  it("is not shown before anyone asked", () => {
+    assert.equal(isCancelling(null, "run_1", false), false);
+  });
+
+  /**
+   * A follow-up turn is a NEW run against the same warm workspace. Inheriting
+   * the previous run's pending cancel would put a spinner and a disabled Cancel
+   * button on a run nobody has asked to stop.
+   */
+  it("does not carry over to a follow-up turn", () => {
+    assert.equal(isCancelling("run_1", "run_2", false), false);
+  });
+
+  it("is not shown before the stream knows which run it is watching", () => {
+    assert.equal(isCancelling("run_1", null, false), false);
   });
 });

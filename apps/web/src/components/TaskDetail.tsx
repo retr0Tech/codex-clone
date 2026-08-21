@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import type { RunBudget } from "@codex-clone/core";
 import { isTerminal, transcriptItems } from "../lib/eventReducer";
+import { isCancelling } from "../lib/streamPolicy";
 import { useTranscriptStream, type ConnectionState } from "../lib/useTranscriptStream";
 import type { RunView, TaskView } from "../lib/types";
 import { StickToBottom } from "./StickToBottom";
@@ -90,12 +91,13 @@ export function TaskDetail({
 
   const usage = sumUsage(runs);
   /** True from the click until the run reaches a terminal status. */
-  const cancelling = cancelRequested !== null && cancelRequested === runId && running;
+  const cancelling = isCancelling(cancelRequested, runId, !running);
 
-  // A new run (a follow-up turn) must not inherit the previous one's pending
-  // cancel, and a run that has finished winding down is no longer cancelling.
+  // Released once the run has actually stopped, or once a follow-up turn has
+  // started a different run. `isCancelling` already refuses to show the state
+  // in either case; this only keeps the held id from lingering.
   useEffect(() => {
-    if (cancelRequested !== null && (cancelRequested !== runId || !running)) setCancelRequested(null);
+    if (cancelRequested !== null && !isCancelling(cancelRequested, runId, !running)) setCancelRequested(null);
   }, [cancelRequested, runId, running]);
 
   const requestCancel = useCallback(() => {
