@@ -140,9 +140,9 @@ entered in Settings and stored encrypted in Postgres, keyed by
 `APP_ENCRYPTION_KEY`. Decrypted values are registered with a redaction filter
 that scrubs them from all log output. Nothing sensitive is committed.
 
-> The worker currently reads `OPENAI_API_KEY` from its environment as a
-> temporary seam (`EnvCredentialStore`). Wiring it to the encrypted store is a
-> one-line change, marked at the call site.
+The worker's model gateway reads the OpenAI key from that same encrypted store
+on every call rather than caching it, so replacing the key in Settings takes
+effect on the next model call instead of on the next restart.
 
 ## Troubleshooting
 
