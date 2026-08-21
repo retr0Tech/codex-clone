@@ -6,6 +6,7 @@ import { isTerminal, transcriptItems } from "../lib/eventReducer";
 import { useTranscriptStream, type ConnectionState } from "../lib/useTranscriptStream";
 import type { RunView, TaskView } from "../lib/types";
 import { StickToBottom } from "./StickToBottom";
+import { ArchiveActions } from "./archive/ArchiveActions";
 import { Transcript } from "./transcript/Transcript";
 import { DiffCard, DiffView } from "./diff/DiffView";
 import { Badge } from "./ui/Badge";
@@ -39,6 +40,7 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
   const [publishing, setPublishing] = useState<null | "push" | "pr">(null);
   const [publish, setPublish] = useState<PublishState | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const stream = useTranscriptStream({ taskId: task.id, wsUrl });
   const { state } = stream;
@@ -178,6 +180,11 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
               {actionError}
             </p>
           ) : null}
+          {notice ? (
+            <p className="mt-2 rounded-md border border-border bg-surface-2 px-2.5 py-1.5 text-[12px] text-fg-muted">
+              {notice}
+            </p>
+          ) : null}
           {publish ? <PublishBanner publish={publish} /> : null}
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -227,6 +234,9 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
             >
               {publishing === "pr" ? "Opening…" : "Open PR"}
             </Button>
+            {/* Milestone 8. Archiving is a status change, not a deletion: the
+                transcript is kept and the workspace moves to the cold tier. */}
+            <ArchiveActions task={task} running={running} onNotice={setNotice} onError={setActionError} />
             {running && runId ? (
               <Button
                 size="sm"

@@ -26,7 +26,10 @@ export function useTasks(pollMs = TASK_POLL_MS): { tasks: TaskView[]; loading: b
 
     const load = async () => {
       try {
-        const response = await fetch("/api/tasks", { signal: controller.signal, cache: "no-store" });
+        // `archived=1`: the sidebar shows a COUNT of archived tasks next to the
+        // link, and filters them out of the per-repo list itself. Without this
+        // the endpoint never returns one and that count is permanently zero.
+        const response = await fetch("/api/tasks?archived=1", { signal: controller.signal, cache: "no-store" });
         if (!response.ok) return;
         const body = (await response.json()) as { tasks?: TaskView[] };
         if (!controller.signal.aborted) setTasks(body.tasks ?? []);
