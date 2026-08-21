@@ -1,9 +1,9 @@
 import "server-only";
 
 import { randomUUID } from "node:crypto";
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { describeCron, nextCronRun } from "@codex-clone/cron";
-import { repos, runs, scheduledExecutions, scheduledJobs, type Database } from "@codex-clone/db";
+import { repos, scheduledJobs, type Database } from "@codex-clone/db";
 import { findRepoByFullName } from "@codex-clone/github";
 
 import type { ScheduledExecutionView, ScheduledJobView } from "../../../../lib/scheduled";
@@ -148,37 +148,70 @@ export async function deleteScheduledJob(db: Database, id: string): Promise<void
   if (deleted.length === 0) throw new UnknownJobError(id);
 }
 
+/** A type alias, not an interface: `execute<T>` needs the implicit index signature. */
+type ExecutionRow = {
+  id: string;
+  job_id: string;
+  task_id: string | null;
+  scheduled_for: Date | string;
+  status: ScheduledExecutionView["status"];
+  reason: string | null;
+  created_at: Date | string;
+  run_status: ScheduledExecutionView["runStatus"];
+};
+
 /**
  * The last few occurrences per job, newest first, INCLUDING skips.
  *
- * One query for every job on the page rather than one per job: the list is
- * server-rendered on first paint, and N+1 there is N+1 in the critical path.
+ * One query for every job on the page rather than one per job -- the list is
+ * server-rendered on first paint, and N+1 there is N+1 in the critical path --
+ * and the cut to `RECENT_EXECUTIONS` happens in the window function rather than
+ * in JavaScript, so a job that has been firing every five minutes for a month
+ * does not send eight thousand rows over the wire to have eight of them kept.
  */
 async function recentExecutions(
   db: Database,
   jobIds: string[],
 ): Promise<Map<string, ScheduledExecutionView[]>> {
-  const rows = await db
-    .select({ execution: scheduledExecutions, runStatus: runs.status })
-    .from(scheduledExecutions)
-    .leftJoin(runs, eq(runs.scheduledExecutionId, scheduledExecutions.id))
-    .where(inArray(scheduledExecutions.jobId, jobIds))
-    .orderBy(desc(scheduledExecutions.scheduledFor), desc(scheduledExecutions.createdAt));
+  const rows = await db.execute<ExecutionRow>(sql`
+    select id, job_id, task_id, scheduled_for, status, reason, created_at, run_status
+    from (
+      select se.id,
+             se.job_id,
+             se.task_id,
+             se.scheduled_for,
+             se.status,
+             se.reason,
+             se.created_at,
+             r.status as run_status,
+             row_number() over (
+               partition by se.job_id
+               order by se.scheduled_for desc, se.created_at desc
+             ) as rank
+      from scheduled_executions se
+      left join runs r on r.scheduled_execution_id = se.id
+      where se.job_id in (${sql.join(
+        jobIds.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+    ) ranked
+    where rank <= ${RECENT_EXECUTIONS}
+    order by job_id, scheduled_for desc
+  `);
 
   const byJob = new Map<string, ScheduledExecutionView[]>();
   for (const row of rows) {
-    const list = byJob.get(row.execution.jobId) ?? [];
-    if (list.length >= RECENT_EXECUTIONS) continue;
+    const list = byJob.get(row.job_id) ?? [];
     list.push({
-      id: row.execution.id,
-      taskId: row.execution.taskId,
-      scheduledFor: row.execution.scheduledFor.toISOString(),
-      status: row.execution.status,
-      reason: row.execution.reason,
-      runStatus: row.runStatus ?? null,
-      createdAt: row.execution.createdAt.toISOString(),
+      id: row.id,
+      taskId: row.task_id,
+      scheduledFor: new Date(row.scheduled_for).toISOString(),
+      status: row.status,
+      reason: row.reason,
+      runStatus: row.run_status ?? null,
+      createdAt: new Date(row.created_at).toISOString(),
     });
-    byJob.set(row.execution.jobId, list);
+    byJob.set(row.job_id, list);
   }
   return byJob;
 }

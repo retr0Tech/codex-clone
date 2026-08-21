@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { redact } from "@codex-clone/core";
 import { scheduledExecutions } from "@codex-clone/db";
 import { claimDueJobs, executionId, hasActiveExecution, type ClaimOptions } from "./claim.js";
@@ -253,14 +253,4 @@ export class Scheduler {
   #log(message: string): void {
     this.options.deps.log?.(message);
   }
-}
-
-/** Convenience for a caller that only wants the row back, e.g. a control route. */
-export async function executionById(deps: SchedulerDeps, id: string) {
-  const [row] = await deps.db
-    .select()
-    .from(scheduledExecutions)
-    .where(eq(scheduledExecutions.id, id))
-    .limit(1);
-  return row ?? null;
 }
