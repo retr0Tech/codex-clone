@@ -175,7 +175,12 @@ export class GatewayServer {
       write({
         type: "refused",
         reason: admission.breach,
-        message: `run budget exhausted (${admission.breach}); the wind-down turn has already been used`,
+        // A meter closed deliberately (cancel) says so in its own words; only a
+        // real breach gets the budget wording. The refusal lands in the
+        // transcript, so it has to be true.
+        message:
+          meter.closedReason ??
+          `run budget exhausted (${admission.breach}); the wind-down turn has already been used`,
       });
       res.end();
       return;

@@ -110,10 +110,27 @@ export class RunMeter {
     return { action: "forward" };
   }
 
+  /**
+   * Why this meter was closed, in the words of whoever closed it.
+   *
+   * A cancel and a wall-clock breach take the same path -- no more model calls,
+   * immediately -- but they are not the same event, and the refusal the agent
+   * receives ends up in the transcript. Without this, cancelling from the UI
+   * told the user their budget was exhausted, which was simply untrue.
+   * `BudgetBreach` is a frozen union in core, so the distinction is carried as
+   * a message rather than as a fourth member of it.
+   */
+  #closedReason: string | null = null;
+
+  get closedReason(): string | null {
+    return this.#closedReason;
+  }
+
   /** Cancel from the UI takes the same path as a breach: no more model calls. */
-  close(breach: BudgetBreach = "wall_clock"): void {
+  close(breach: BudgetBreach = "wall_clock", reason?: string): void {
     this.#state = "closed";
     this.#breach ??= breach;
+    this.#closedReason ??= reason ?? null;
   }
 }
 
