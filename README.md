@@ -58,7 +58,7 @@ to create a task.
 pnpm build && pnpm typecheck && pnpm lint && pnpm test
 ```
 
-Expect **482 tests, 0 failures**, in roughly 40 seconds, with Docker and
+Expect **486 tests, 0 failures**, in roughly 40 seconds, with Docker and
 Postgres up and the agent image built — the integration suites skip otherwise,
 with a reason, and the count is correspondingly lower. Two tests skip unless
 `ripgrep` is installed on the host (`brew install ripgrep`); it is baked into
