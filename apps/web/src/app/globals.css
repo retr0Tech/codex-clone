@@ -1,26 +1,238 @@
 @import "tailwindcss";
 
+/*
+ * Theme is a resolved attribute on <html>, never an unresolved "system" state:
+ * an inline script in the layout collapses the stored preference and the OS
+ * setting down to "light" or "dark" before first paint. Components then use
+ * semantic tokens (bg-surface, text-fg-muted) instead of dark: variants, so a
+ * component is written once and is correct in both themes by construction.
+ */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --bg-sunken: #f5f5f6;
+  --surface: #ffffff;
+  --surface-2: #fafafa;
+  --surface-3: #f1f1f3;
+
+  --border: #e6e6ea;
+  --border-strong: #d2d2d8;
+
+  --fg: #15151a;
+  --fg-muted: #6b6b76;
+  --fg-faint: #9a9aa4;
+
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-fg: #ffffff;
+  --accent-soft: #eeecfd;
+
+  --ok: #146c34;
+  --ok-soft: #e4f4e9;
+  --warn: #8a5a06;
+  --warn-soft: #fbf0da;
+  --danger: #b52323;
+  --danger-soft: #fceaea;
+  --info: #24619f;
+  --info-soft: #e7f0fa;
+
+  --add-fg: #14713a;
+  --add-bg: #e5f6ea;
+  --del-fg: #ad2223;
+  --del-bg: #fceaea;
+  --hunk-fg: #5b5f9b;
+  --hunk-bg: #eef0fb;
+
+  /* The terminal block stays dark in both themes -- it is a console, and
+     reading install output as black-on-white loses the mental cue. */
+  --term-bg: #16161a;
+  --term-surface: #1d1d22;
+  --term-fg: #d5d5dc;
+  --term-dim: #8a8a95;
+  --term-err: #ff9e9e;
+
+  --ring: #4f46e5;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #08080a;
+  --bg-sunken: #0c0c0f;
+  --surface: #111114;
+  --surface-2: #16161a;
+  --surface-3: #1d1d22;
+
+  --border: #26262c;
+  --border-strong: #37373f;
+
+  --fg: #ececf1;
+  --fg-muted: #8e8e9a;
+  --fg-faint: #6a6a76;
+
+  --accent: #7c73f0;
+  --accent-hover: #8f88f4;
+  --accent-fg: #0b0b10;
+  --accent-soft: #1e1b3a;
+
+  --ok: #57c47f;
+  --ok-soft: #10231a;
+  --warn: #d9a441;
+  --warn-soft: #241d0e;
+  --danger: #f0797a;
+  --danger-soft: #2a1416;
+  --info: #6ba6e8;
+  --info-soft: #101d2c;
+
+  --add-fg: #6fd08f;
+  --add-bg: #0f2418;
+  --del-fg: #f08c8c;
+  --del-bg: #2a1416;
+  --hunk-fg: #9a9ae0;
+  --hunk-bg: #17172a;
+
+  --term-bg: #0b0b0e;
+  --term-surface: #141418;
+  --term-fg: #d5d5dc;
+  --term-dim: #75757f;
+  --term-err: #ff9e9e;
+
+  --ring: #7c73f0;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-bg: var(--bg);
+  --color-bg-sunken: var(--bg-sunken);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-faint: var(--fg-faint);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+
+  --color-add-fg: var(--add-fg);
+  --color-add-bg: var(--add-bg);
+  --color-del-fg: var(--del-fg);
+  --color-del-bg: var(--del-bg);
+  --color-hunk-fg: var(--hunk-fg);
+  --color-hunk-bg: var(--hunk-bg);
+
+  --color-term-bg: var(--term-bg);
+  --color-term-surface: var(--term-surface);
+  --color-term-fg: var(--term-fg);
+  --color-term-dim: var(--term-dim);
+  --color-term-err: var(--term-err);
+
+  --color-ring: var(--ring);
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    background: var(--bg);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+
+  /* Keyboard-first: a visible ring on :focus-visible everywhere, and never a
+     mouse-click ring, so the UI stays quiet under the pointer. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--fg);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border: 3px solid var(--bg);
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--fg-faint);
+  }
+
+  summary {
+    cursor: pointer;
+    list-style: none;
+  }
+  summary::-webkit-details-marker {
+    display: none;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer utilities {
+  /* Scoped to the immediate parent so nested disclosures stay independent. */
+  details[open] > summary .disclosure-chevron {
+    transform: rotate(90deg);
+  }
+
+  /* The caret on a message that is still streaming tokens. */
+  .caret::after {
+    content: "";
+    display: inline-block;
+    width: 0.5em;
+    height: 1.05em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: var(--accent);
+    animation: caret-blink 1.05s steps(2, start) infinite;
+  }
+
+  @keyframes caret-blink {
+    to {
+      visibility: hidden;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .caret::after {
+      animation: none;
+    }
+  }
 }
