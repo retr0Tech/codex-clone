@@ -54,7 +54,7 @@ to create a task.
 pnpm build && pnpm typecheck && pnpm lint && pnpm test
 ```
 
-Expect **346 tests, 0 failures**, in roughly 20 seconds. Two tests skip unless
+Expect **369 tests, 0 failures**, in roughly 20 seconds. Two tests skip unless
 `ripgrep` is installed on the host (`brew install ripgrep`); it is baked into
 the agent image, so this affects only host-side runs. The Docker- and
 Postgres-dependent suites skip with a reason when either is unavailable, and
@@ -97,6 +97,27 @@ and which process does each part:
 Follow-up turns are a new run against the same **warm** workspace — the volume
 outlives its container, so the second turn skips the clone entirely and its
 events continue in the same transcript.
+
+A workspace nobody has touched for fifteen minutes moves to the cold tier, and
+comes back on the next turn:
+
+```
+ HOT   docker volume ws-<taskId>        live /workspace, free, per-turn
+         │  idle reap  (or Archive)
+         ▼
+ COLD  ~/.codexclone/snapshots/<taskId>.tar.zst
+         repo + .git + uncommitted edits, sha256-verified
+         WITHOUT node_modules / .venv / dist / caches
+         │  wake: next turn, or Restore
+         ▼
+       fresh volume + the repo setup script re-runs
+```
+
+The excludes are what keep it megabytes rather than gigabytes — except for a
+directory the repository actually tracks, which is never dropped, so a repo that
+commits its `dist/` still restores byte-for-byte. Nothing else does: `git diff`
+against the restored workspace is empty, the uncommitted edit the agent left is
+still there, and the file modes survive.
 
 A real run of exactly that, streamed live:
 
@@ -142,14 +163,24 @@ A real run of exactly that, streamed live:
 - **Cancel** — closes the gateway meter first, so no further model call is
   admitted even mid-turn, then SIGTERMs with a grace period. Partial work
   survives, because the workspace volume is the live state.
+- **Archive and restore, via cold snapshots** — a workspace idle for
+  `IDLE_REAP_MS` (15 minutes) is exported to `~/.codexclone/snapshots/<taskId>.tar.zst`
+  and its Docker volume is freed; the next turn restores it and carries on.
+  Archiving does the same thing on demand and flips the status — it is a status
+  change, never a deletion, so the transcript is retained in full and the
+  snapshot is kept. `/archived` lists what is cold and how much disk it holds,
+  and Restore brings a task back to the sidebar. Restoring recreates the
+  workspace **as it was**: uncommitted edits included, on the commit it was
+  pinned to. It does not rebase — **Rebase onto `main`** is a separate button
+  that also moves `tasks.base_sha`, so the next derived diff is measured
+  against the new base rather than crediting the agent with someone else's
+  commit.
 - **`/mock/transcript`** — replays a recorded run through the same reducer the
   socket feeds, including cancellation, budget exhaustion, and a failed setup
   script. Useful for seeing states a happy run does not produce.
 
-**Not built:** archive and restore via cold snapshots (milestone 8), scheduled
-jobs (milestone 9), and the cost/budget UI (milestone 10). The `/scheduled` page
-still renders fixtures, and the idle reaper that would move a workspace to the
-cold tier does not exist — a task's volume lives until you remove it.
+**Not built:** scheduled jobs (milestone 9) and the cost/budget UI
+(milestone 10). The `/scheduled` page still renders fixtures.
 
 ## Architecture
 

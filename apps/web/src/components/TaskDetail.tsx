@@ -52,6 +52,9 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
   const status = state.events.length > 0 ? state.status : (latestRun?.status ?? "queued");
   const statusMeta = STATUS_META[status];
   const running = !isTerminal(status);
+  // An archived task is not claimable (see claim.ts), so a follow-up would sit
+  // queued forever. Say so rather than letting the composer take one.
+  const archived = task.status === "archived";
   const stopReason = state.stopReason ?? latestRun?.stopReason ?? null;
   const runId = state.runId ?? latestRun?.id ?? null;
 
@@ -328,11 +331,13 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
               onChange={(e) => setFollowUp(e.target.value)}
               onKeyDown={onComposerKeyDown}
               placeholder={
-                running
-                  ? "A run is in flight. The follow-up queues behind it."
-                  : task.mode === "ask"
-                    ? "Ask a follow-up. Ask mode mounts the workspace read-only."
-                    : "Send a follow-up turn. It reuses this task's warm workspace."
+                archived
+                  ? "This task is archived. Restore it to send another turn."
+                  : running
+                    ? "A run is in flight. The follow-up queues behind it."
+                    : task.mode === "ask"
+                      ? "Ask a follow-up. Ask mode mounts the workspace read-only."
+                      : "Send a follow-up turn. It reuses this task's warm workspace."
               }
               className="border-0 bg-transparent px-1.5 py-1 focus-visible:outline-none"
             />
@@ -346,11 +351,13 @@ export function TaskDetail({ task, runs, wsUrl }: { task: TaskView; runs: RunVie
                 size="sm"
                 variant="primary"
                 onClick={() => void sendFollowUp()}
-                disabled={followUp.trim().length === 0 || sending || running}
+                disabled={followUp.trim().length === 0 || sending || running || archived}
                 title={
-                  running
-                    ? "This task already has a run in flight; one run per task at a time"
-                    : "Queues a new run against the same workspace, continuing this task"
+                  archived
+                    ? "Archived tasks are not claimable. Restore it first; the workspace comes back from its cold snapshot."
+                    : running
+                      ? "This task already has a run in flight; one run per task at a time"
+                      : "Queues a new run against the same workspace, continuing this task"
                 }
                 className={cn(followUp.trim().length === 0 && "opacity-45")}
               >
