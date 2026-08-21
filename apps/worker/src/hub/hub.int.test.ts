@@ -230,10 +230,20 @@ describe("transcript hub", { skip: skip === false ? undefined : skip }, () => {
     client.socket.close();
   });
 
+  /**
+   * Deltas are dropped for a subscription that is still reading history -- they
+   * are worthless a second later, so buffering them would be worse than losing
+   * them. The test therefore has to wait until the subscription is genuinely
+   * live, and receiving a backfilled frame is the observable proof of that:
+   * the hub flips to live synchronously after the last history send, before any
+   * of it can reach a client.
+   */
   it("broadcasts token deltas without ever writing them", async () => {
+    const opener = await seed(1);
     const client = connect(`?taskId=${taskId}&after=0`);
     await client.open;
-    await waitFor(client.frames, () => client.frames.length === 1, "hello");
+    await waitFor(client.frames, () => eventsOf(client.frames).length === 1, "the backfill, which means live");
+    assert.deepEqual(eventsOf(client.frames), opener);
 
     hub.bindRun(runId, taskId);
     hub.publishDelta(runId, "m1", "Hel");
@@ -242,7 +252,7 @@ describe("transcript hub", { skip: skip === false ? undefined : skip }, () => {
     await waitFor(client.frames, () => client.frames.filter((f) => f.kind === "delta").length === 2, "two deltas");
 
     const stored = await db.select().from(events).where(eq(events.taskId, taskId));
-    assert.equal(stored.length, 0, "a delta must never reach the event log");
+    assert.equal(stored.length, 1, "the seeded event only -- a delta must never reach the event log");
 
     // The coalesced message is the durable truth; the deltas that built it were
     // overlay. Reconnecting proves it: history contains the message and no
@@ -250,24 +260,32 @@ describe("transcript hub", { skip: skip === false ? undefined : skip }, () => {
     const message = toRow({
       runId,
       taskId,
-      seq: 64,
+      seq: 128,
       type: "message",
       payload: { messageId: "m1", role: "assistant", text: "Hello" },
     });
     await appendEvent(db, message);
     hub.publish(message);
-    await waitFor(client.frames, () => eventsOf(client.frames).length === 1, "the durable message");
+    await waitFor(client.frames, () => eventsOf(client.frames).length === 2, "the durable message");
 
     const history = await readEvents(db, taskId);
-    assert.deepEqual(history, [message]);
+    assert.deepEqual(history, [...opener, message]);
+    assert.equal(
+      history.some((row) => JSON.stringify(row).includes("Hel\"")),
+      false,
+      "no partial token text may survive in history",
+    );
 
     client.socket.close();
   });
 
   it("drops a delta for a run it has never been told about", async () => {
+    await seed(1);
     const client = connect(`?taskId=${taskId}&after=0`);
     await client.open;
-    await waitFor(client.frames, () => client.frames.length === 1, "hello");
+    // Same reason as above: wait until the subscription is live, or this would
+    // pass for the wrong reason -- a backfilling subscriber drops deltas too.
+    await waitFor(client.frames, () => eventsOf(client.frames).length === 1, "the backfill, which means live");
 
     hub.publishDelta(`run-unknown-${randomUUID().slice(0, 6)}`, "m9", "nowhere");
     await new Promise((resolve) => setTimeout(resolve, 100));
