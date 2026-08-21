@@ -6,8 +6,9 @@ import {
   RECONNECT_MAX_MS,
   RECONNECT_MIN_MS,
   advanceCursor,
+  openingHello,
   reconnectDelayMs,
-  shouldResetOnHello,
+  shouldDispatchServerHello,
 } from "./streamPolicy";
 
 function row(seq: number, text: string): AnyEventRow {
@@ -21,45 +22,61 @@ function row(seq: number, text: string): AnyEventRow {
   };
 }
 
-describe("hello handling", () => {
-  it("resets on the first hello of a subscription", () => {
-    assert.equal(shouldResetOnHello(false), true);
+describe("who owns the reset", () => {
+  /**
+   * The bug this rule exists to prevent, and it is not hypothetical -- it shipped
+   * for one commit and emptied the transcript of a task that had eighteen events.
+   *
+   * The page folds history over HTTP, then connects with `after=<lastSeq>`. The
+   * server's hello arrives BEFORE the backfill, and the backfill covers only
+   * what comes after the cursor. Dispatching that hello therefore clears
+   * everything the client just loaded and nothing refills it.
+   */
+  it("dispatching the server's hello would erase the history the client just folded", () => {
+    const history = [row(64, "one"), row(128, "two"), row(192, "three")];
+    const loaded = foldEvents(history);
+    assert.equal(loaded.items.length, 3);
+
+    // The socket now subscribes with after=192, so the server has nothing to
+    // send. Its hello is the only frame that arrives.
+    const serverHello: ServerFrame = { kind: "hello", taskId: "task_1", runId: "run_1", latestSeq: 192 };
+
+    const naive = transcriptReducer(loaded, serverHello);
+    assert.equal(naive.items.length, 0, "this is the bug: a full transcript, wiped");
+
+    // Ignoring it keeps what we have, and the cursor is still correct.
+    assert.equal(shouldDispatchServerHello(), false);
+    assert.equal(loaded.items.length, 3);
+    assert.equal(loaded.lastSeq, 192);
   });
 
-  it("suppresses a second hello, because that one is a reconnect", () => {
-    assert.equal(shouldResetOnHello(true), false);
+  it("the same wipe would hit every reconnect, not just the first connect", () => {
+    const connected = foldEvents([row(64, "one"), row(128, "two")]);
+    const gap = [row(192, "three")];
+
+    let resumed = connected;
+    for (const event of gap) resumed = transcriptReducer(resumed, eventFrame(event));
+
+    assert.equal(resumed.items.length, 3);
+    assert.deepEqual(resumed.items, foldEvents([row(64, "one"), row(128, "two"), ...gap]).items);
   });
 
   /**
-   * The bug this rule prevents, demonstrated: a reconnect asks for
-   * `after=<cursor>`, so the server sends only what came after it. Feeding the
-   * accompanying hello to the reducer would clear everything before the cursor
-   * and leave the transcript starting in the middle.
+   * The reset still has to happen -- just from the client, at a moment when it
+   * knows there is nothing worth keeping.
    */
-  it("dispatching a reconnect's hello would erase everything before the cursor", () => {
-    const history = [row(64, "one"), row(128, "two"), row(192, "three")];
-    const connected = foldEvents(history);
-    assert.equal(connected.items.length, 3);
-
-    const gap = [row(256, "four")];
-
-    // Wrong: reset, then apply only the gap.
-    let naive = transcriptReducer(connected, { kind: "hello", taskId: "task_1", runId: "run_1", latestSeq: 256 });
-    for (const event of gap) naive = transcriptReducer(naive, eventFrame(event));
-    assert.equal(naive.items.length, 1, "the reset threw away the backfilled history");
-
-    // Right: suppress the hello, apply the gap on top.
-    let resumed = connected;
-    for (const event of gap) resumed = transcriptReducer(resumed, eventFrame(event));
-    assert.equal(resumed.items.length, 4);
-    assert.deepEqual(foldEvents([...history, ...gap]).items, resumed.items);
-  });
-
-  it("a first connect still resets, so switching tasks cannot inherit a transcript", () => {
+  it("the client's own opening hello clears a previous task's transcript", () => {
     const stale = foldEvents([row(64, "from the previous task")]);
-    const fresh = transcriptReducer(stale, { kind: "hello", taskId: "task_2", runId: "run_2", latestSeq: 0 });
+    const fresh = transcriptReducer(stale, openingHello("task_2"));
     assert.deepEqual(fresh.items, []);
     assert.equal(fresh.taskId, "task_2");
+    assert.equal(fresh.lastSeq, 0, "and the cursor restarts, so history is fetched from the beginning");
+  });
+
+  it("the opening hello is a real ServerFrame, so there is still only one door into the reducer", () => {
+    const frame = openingHello("task_9");
+    assert.equal(frame.kind, "hello");
+    assert.equal(frame.kind === "hello" ? frame.taskId : "", "task_9");
   });
 });
 

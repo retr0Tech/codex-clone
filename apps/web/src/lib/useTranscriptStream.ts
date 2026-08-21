@@ -8,7 +8,7 @@ import {
   transcriptReducer,
   type TranscriptState,
 } from "./eventReducer";
-import { advanceCursor, reconnectDelayMs, shouldResetOnHello } from "./streamPolicy";
+import { advanceCursor, openingHello, reconnectDelayMs, shouldDispatchServerHello } from "./streamPolicy";
 
 /**
  * The live transcript, over the worker's WebSocket.
@@ -58,9 +58,6 @@ export function useTranscriptStream({ taskId, wsUrl }: { taskId: string; wsUrl: 
   // The reconnect cursor, mirrored out of reducer state so the socket's
   // `onclose` can read it without the effect closing over a stale render.
   const lastSeqRef = useRef(0);
-  // Whether this connection has already introduced itself for this task. A
-  // second hello for the same task is a RECONNECT, and must not reset.
-  const helloSeenRef = useRef(false);
 
   useEffect(() => {
     lastSeqRef.current = state.lastSeq;
@@ -81,8 +78,12 @@ export function useTranscriptStream({ taskId, wsUrl }: { taskId: string; wsUrl: 
     let attempt = 0;
 
     lastSeqRef.current = 0;
-    helloSeenRef.current = false;
     setConnection("connecting");
+    setServerLatestSeq(0);
+    // The client's own reset, before anything is folded. Switching tasks must
+    // not leave the previous one's items in the reducer, and the server's hello
+    // cannot be used for this -- see streamPolicy.ts.
+    dispatch(openingHello(taskId));
 
     /**
      * History over HTTP. Folded through `eventFrame()` so it enters the reducer
@@ -133,12 +134,12 @@ export function useTranscriptStream({ taskId, wsUrl }: { taskId: string; wsUrl: 
         }
 
         if (frame.kind === "hello") {
+          // Taken for its cursor, not as an instruction: dispatching it would
+          // clear the history this client has already folded, and the backfill
+          // that follows only covers what comes after `after`. See
+          // streamPolicy.ts.
           setServerLatestSeq(frame.latestSeq);
-          // See streamPolicy.ts: the reducer resets on hello, which is right
-          // for a first connect and wrong for a reconnect.
-          const reset = shouldResetOnHello(helloSeenRef.current);
-          helloSeenRef.current = true;
-          if (!reset) return;
+          if (!shouldDispatchServerHello()) return;
         }
         // Same reason as the history fold: a drop can happen between two
         // messages and the next connect must resume from the real cursor, not
