@@ -65,6 +65,8 @@ export const config = {
   maxConcurrentSandboxes: num("MAX_CONCURRENT_SANDBOXES", 3),
   /** Container is reaped to the cold snapshot store after this much idle time. */
   idleReapMs: num("IDLE_REAP_MS", 15 * 60 * 1000),
+  /** How often the reaper looks. A minute is precise enough for a 15-minute TTL. */
+  reaperPollMs: num("REAPER_POLL_MS", 60_000),
   schedulerTickMs: num("SCHEDULER_TICK_MS", 30_000),
   stopGraceMs: num("STOP_GRACE_MS", 10_000),
 

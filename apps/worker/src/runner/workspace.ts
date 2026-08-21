@@ -53,12 +53,24 @@ export interface PrepareWorkspaceOptions {
   scratchRoot: string;
   /** A mirror fetched more recently than this is good enough. */
   mirrorStaleAfterMs?: number;
+  /**
+   * Wake-after-reap (PLAN.md §3.1). Called when the task has no hot volume;
+   * returns true if it restored one from the cold snapshot store, false if
+   * there was nothing to restore and this is genuinely a fresh workspace.
+   *
+   * Injected rather than imported so the seeding path has no opinion about
+   * where cold storage is -- and so a worker configured without a snapshot
+   * store still clones from the mirror instead of failing.
+   */
+  restoreFromCold?: (ctx: { taskId: string; volumeName: string }) => Promise<boolean>;
   onLog?: (line: string) => void;
 }
 
 export interface PreparedWorkspace {
   /** False when the volume was already seeded and this was a warm reuse. */
   seeded: boolean;
+  /** True when the workspace came back from the cold tier rather than a clone. */
+  restoredFromCold: boolean;
   mirrorPath: string;
   mirrorFetchedAt: Date;
 }
@@ -106,7 +118,25 @@ export async function prepareWorkspace(
 
   if (alreadySeeded && (await volumeExists(options.docker, spec.volumeName))) {
     log(`reusing the warm workspace in ${spec.volumeName}\n`);
-    return { seeded: false, mirrorPath: mirror.path, mirrorFetchedAt: mirror.fetchedAt };
+    return { seeded: false, restoredFromCold: false, mirrorPath: mirror.path, mirrorFetchedAt: mirror.fetchedAt };
+  }
+
+  /**
+   * Wake after reap (PLAN.md §3.1). The reaper cleared `volume_name` on its way
+   * out, so this looks exactly like a new task -- and it must not be treated as
+   * one, or the agent's uncommitted work would be replaced by a clean checkout
+   * of the base commit. The cold snapshot is asked first, and only a task that
+   * has none falls through to the clone below.
+   *
+   * The repo setup script re-runs regardless: it runs on every container start,
+   * which is what makes it safe to leave node_modules out of the snapshot.
+   */
+  if (!alreadySeeded && options.restoreFromCold) {
+    log(`no hot workspace for this task; checking the cold snapshot store\n`);
+    if (await options.restoreFromCold({ taskId: spec.taskId, volumeName: spec.volumeName })) {
+      return { seeded: true, restoredFromCold: true, mirrorPath: mirror.path, mirrorFetchedAt: mirror.fetchedAt };
+    }
+    log(`no cold snapshot either; this workspace is new\n`);
   }
 
   await mkdir(options.scratchRoot, { recursive: true });
@@ -134,7 +164,7 @@ export async function prepareWorkspace(
     });
     log(`workspace ready\n`);
 
-    return { seeded: true, mirrorPath: mirror.path, mirrorFetchedAt: mirror.fetchedAt };
+    return { seeded: true, restoredFromCold: false, mirrorPath: mirror.path, mirrorFetchedAt: mirror.fetchedAt };
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => undefined);
   }

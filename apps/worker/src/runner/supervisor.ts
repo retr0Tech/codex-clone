@@ -8,6 +8,7 @@ import type {
   RunStatus,
   SandboxHandle,
   SandboxProvider,
+  SnapshotStore,
 } from "@codex-clone/core";
 import { redact } from "@codex-clone/core";
 import {
@@ -29,6 +30,7 @@ import {
   setRunSandbox,
   type TaskContext,
 } from "./run-state.js";
+import { restoreWorkspace } from "../snapshots/archive.js";
 import { SeqAllocator, runBase } from "./seq.js";
 import { DiffTrigger, deriveDiff } from "./diff.js";
 import { prepareWorkspace, workBranchName } from "./workspace.js";
@@ -60,6 +62,12 @@ export interface SupervisorDeps {
   docker: Docker;
   sandboxes: SandboxProvider;
   mirrors: MirrorManager;
+  /**
+   * The cold tier (PLAN.md §3.2). Optional: without one a reaped task simply
+   * re-clones, which is wrong but not broken. With one, a task the reaper has
+   * been through wakes back into the workspace it had.
+   */
+  snapshots?: SnapshotStore;
   meters: MeterRegistry;
   /** The PAT, for the mirror fetch. Resolved per run so a Settings change lands. */
   githubToken: () => Promise<string | null>;
@@ -291,6 +299,25 @@ async function start(
         log(`[task ${task.taskId.slice(0, 8)}] ${line.trimEnd()}`);
         void emit("setup_log", { stream: "stdout", text: line });
       },
+      ...(deps.snapshots
+        ? {
+            restoreFromCold: async (ctx: { taskId: string; volumeName: string }) => {
+              const meta = await restoreWorkspace({
+                docker: deps.docker,
+                store: deps.snapshots as SnapshotStore,
+                taskId: ctx.taskId,
+                volumeName: ctx.volumeName,
+                image: deps.config.image,
+                scratchRoot: join(deps.config.dataDir, "snapshot-staging"),
+                onLog: (line) => {
+                  log(`[task ${task.taskId.slice(0, 8)}] ${line.trimEnd()}`);
+                  void emit("setup_log", { stream: "stdout", text: line });
+                },
+              });
+              return meta !== null;
+            },
+          }
+        : {}),
     },
     task.volumeName !== null,
   );

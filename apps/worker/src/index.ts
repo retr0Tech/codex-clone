@@ -12,10 +12,12 @@ import { EncryptedCredentialStore } from "./credentials.js";
 import { OpenAiUpstream } from "./gateway/openai-upstream.js";
 import { GatewayServer } from "./gateway/server.js";
 import { EventHub } from "./hub/server.js";
+import { archiveRoutes, IdleReaper } from "./reaper/index.js";
 import { PublishError, publishTask } from "./runner/publish.js";
 import { RunQueue } from "./runner/queue.js";
 import { recordUsage } from "./runner/run-state.js";
 import type { SupervisorDeps } from "./runner/supervisor.js";
+import { FsSnapshotStore } from "./snapshots/index.js";
 
 /**
  * Worker entrypoint.
@@ -64,6 +66,25 @@ async function main(): Promise<void> {
   // the queue, which owns the run's controller and its container handle.
   let cancelRun: (runId: string) => Promise<boolean> = () => Promise.resolve(false);
   const docker = new Docker({ socketPath: config.dockerSocket });
+  // Milestone 8: the cold tier. Local filesystem today; the SnapshotStore
+  // interface is stream-in / stream-out so S3 drops straight in.
+  const mirrors = new MirrorManager({ dataDir: config.dataDir });
+  const snapshotStore = new FsSnapshotStore(config.snapshotsDir);
+  const reaperDeps = {
+    db,
+    docker,
+    store: snapshotStore,
+    mirrors,
+    githubToken: () => credentials.getGithubToken(),
+    config: {
+      image: config.agentImage,
+      dataDir: config.dataDir,
+      idleReapMs: config.idleReapMs,
+      pollMs: config.reaperPollMs,
+    },
+    isRunning: (taskId: string) => queue.isRunning(taskId),
+    log: (message: string) => console.log(redact(message)),
+  };
   const publishDeps = {
     db,
     docker,
@@ -105,6 +126,9 @@ async function main(): Promise<void> {
           return { status: error instanceof PublishError ? 400 : 500, body: { error: message } };
         }
       },
+      // Milestone 8: archive, restore, and the explicit rebase. Same reasoning
+      // as publish -- each one needs the workspace volume.
+      ...archiveRoutes(reaperDeps),
     },
   });
 
@@ -135,7 +159,10 @@ async function main(): Promise<void> {
     db,
     docker,
     sandboxes,
-    mirrors: new MirrorManager({ dataDir: config.dataDir }),
+    mirrors,
+    // The wake half of the two-tier store: a task the reaper has been through
+    // comes back from here instead of being re-cloned at its base commit.
+    snapshots: snapshotStore,
     meters: gateway.meters,
     githubToken: () => credentials.getGithubToken(),
     model: () => credentials.defaultModel(),
@@ -167,6 +194,10 @@ async function main(): Promise<void> {
   console.log(`[worker] run queue consuming, up to ${config.maxConcurrentSandboxes} concurrent sandbox(es)`);
 
   // Milestone 8: idle reaper -- export cold snapshot, drop hot volume.
+  const reaper = new IdleReaper(reaperDeps);
+  reaper.start();
+  console.log(`[worker] idle reaper sweeping every ${config.reaperPollMs}ms, TTL ${config.idleReapMs}ms`);
+
   // Milestone 9: scheduler tick every config.schedulerTickMs.
 
   let shuttingDown = false;
@@ -175,6 +206,9 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log(`[worker] ${signal} received, shutting down`);
     await queue.stop();
+    // Waits for a sweep in flight: a shutdown between the snapshot and the
+    // volume removal would leave a workspace half-reaped.
+    await reaper.stop();
     await hub.close();
     await gateway.close();
     await close();
