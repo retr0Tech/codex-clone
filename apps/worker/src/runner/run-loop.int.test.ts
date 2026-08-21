@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import Docker from "dockerode";
 import { eq } from "drizzle-orm";
+import type { RunBudget } from "@codex-clone/core";
 import { DEFAULT_LIMITS } from "@codex-clone/core";
 import { appendEvent, createDb, events, readEvents, repos, runs, tasks, type Database } from "@codex-clone/db";
 import { MirrorManager, listPersistedRepos } from "@codex-clone/github";
@@ -21,7 +22,7 @@ import { StaticCredentialStore } from "../gateway/credentials.js";
 import { FakeUpstream, upstream } from "../gateway/fake-upstream.js";
 import { GatewayServer } from "../gateway/server.js";
 import { claimNextRun } from "./claim.js";
-import { superviseRun, type SupervisorDeps } from "./supervisor.js";
+import { RunController, superviseRun, type SupervisorDeps } from "./supervisor.js";
 import { PublishError, publishTask } from "./publish.js";
 import { git } from "./git.js";
 import {
@@ -159,7 +160,10 @@ describe(
     return { taskId, runId, repoId };
   }
 
-  function makeDeps(turns: ConstructorParameters<typeof FakeUpstream>[0]): {
+  function makeDeps(
+    turns: ConstructorParameters<typeof FakeUpstream>[0],
+    budget: RunBudget = { maxTurns: 10, maxCostUsd: 100, wallClockMs: 180_000 },
+  ): {
     deps: SupervisorDeps;
     gateway: GatewayServer;
     fake: FakeUpstream;
@@ -170,7 +174,7 @@ describe(
       socketPath,
       credentials: new StaticCredentialStore(FAKE_KEY),
       upstream: fake,
-      budget: { maxTurns: 10, maxCostUsd: 100, wallClockMs: 180_000 },
+      budget,
     });
     gateways.add(gateway);
 
@@ -182,6 +186,7 @@ describe(
       meters: gateway.meters,
       githubToken: () => Promise.resolve(null),
       model: () => Promise.resolve("gpt-5-mini"),
+      budget: () => Promise.resolve(budget),
       // The fixture repo lives on disk, so the mirror clones from a path.
       cloneUrl: () => originPath,
       config: {
@@ -431,6 +436,114 @@ describe(
       // And the shape round-trips: an ISO string in, an ISO string out.
       const [readBack] = await readEvents(db, taskId);
       assert.equal(readBack?.createdAt, row.createdAt);
+    },
+  );
+
+  /**
+   * The wall clock, proved against a container that will not stop on its own.
+   *
+   * The gateway meter checks the same bound, but only when a model call
+   * arrives -- so an agent parked inside a shell command never trips it. The
+   * scripted turn below is exactly that: one `shell` call that sleeps for five
+   * minutes against a six-second ceiling. Before the host-side deadline
+   * existed, this test hung until its own timeout fired, which is precisely the
+   * failure it now guards against.
+   */
+  it(
+    "a run that outlives its wall clock is stopped and recorded as timed_out",
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const { taskId, runId } = await seedTask("sleep past the wall clock");
+      const { deps, gateway } = makeDeps(
+        [[upstream.toolCall("call_sleep", "shell", { command: "sleep 300" }), upstream.done(500, 20)]],
+        { maxTurns: 10, maxCostUsd: 100, wallClockMs: 6_000 },
+      );
+      await gateway.listen();
+
+      const claimed = await claimSpecific(runId);
+      assert.ok(claimed, `run ${runId} was never claimable -- is a worker running against ${TEST_DATABASE_URL}?`);
+
+      const startedAt = Date.now();
+      // Generously bounded, but far below `sleep 300`: if the deadline does not
+      // fire, this fails with a diagnostic rather than hanging the suite.
+      const outcome = await withTimeout(superviseRun(deps, claimed), 90_000, "the timed-out run loop");
+      const elapsed = Date.now() - startedAt;
+
+      assert.equal(
+        outcome.status,
+        "timed_out",
+        `expected the wall clock to stop this run, got ${outcome.status}: ${outcome.stopReason ?? "(no reason)"}`,
+      );
+      assert.equal(outcome.budgetBreach, "wall_clock");
+      assert.match(outcome.stopReason ?? "", /wall-clock limit/);
+      assert.ok(elapsed < 90_000, `the run took ${elapsed}ms; the sleep it was in was 300_000ms`);
+
+      const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+      assert.equal(run?.status, "timed_out");
+      assert.equal(run?.budgetBreach, "wall_clock");
+      assert.ok(run?.endedAt, "a timed-out run must not look in-flight");
+
+      // The transcript says so too -- a run that ends without saying how is the
+      // failure mode this whole path exists to avoid.
+      const terminal = (await readEvents(db, taskId)).filter((r) => r.type === "status").at(-1);
+      assert.equal((terminal?.payload as { status: string }).status, "timed_out");
+
+      const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId));
+      assert.equal(task?.status, "idle", "the concurrency slot must come back");
+    },
+  );
+
+  /**
+   * The other half of the same story: cancel takes the identical path -- meter
+   * closed first, then SIGTERM -- and must NOT come out the other side looking
+   * like a budget breach.
+   */
+  it(
+    "a cancelled run is recorded as cancelled, never as a budget breach",
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const { taskId, runId } = await seedTask("cancel mid-tool-call");
+      const { deps, gateway } = makeDeps([
+        [upstream.toolCall("call_sleep", "shell", { command: "sleep 300" }), upstream.done(500, 20)],
+      ]);
+      await gateway.listen();
+
+      const claimed = await claimSpecific(runId);
+      assert.ok(claimed, `run ${runId} was never claimable -- is a worker running against ${TEST_DATABASE_URL}?`);
+
+      // The queue owns cancel in production; here the controller and the meter
+      // stand in for it, taking the same two steps in the same order.
+      const controller = new RunController();
+      const run = superviseRun(deps, claimed, controller);
+
+      // Wait for the container to exist, then stop it exactly as the UI would.
+      const handle = await withTimeout(
+        (async () => {
+          for (let i = 0; i < 600 && !controller.handle; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          if (!controller.handle) throw new Error("the sandbox never started");
+          return controller.handle;
+        })(),
+        60_000,
+        "waiting for the sandbox to start",
+      );
+
+      controller.markCancelled("cancelled from the UI");
+      gateway.meters.peek(runId)?.cancel("cancelled from the UI; no further model calls");
+      await deps.sandboxes.stop(handle, { graceMs: 5_000, reason: "cancelled from the UI" });
+
+      const outcome = await withTimeout(run, 90_000, "the cancelled run loop");
+      assert.equal(outcome.status, "cancelled", `got ${outcome.status}: ${outcome.stopReason ?? "(no reason)"}`);
+      assert.equal(outcome.budgetBreach, null, "cancelling is not a budget breach");
+      assert.equal(outcome.stopReason, "cancelled from the UI");
+
+      const [row] = await db.select().from(runs).where(eq(runs.id, runId));
+      assert.equal(row?.status, "cancelled");
+      assert.equal(row?.budgetBreach, null, "the runs row must carry no breach for a cancelled run");
+
+      const terminal = (await readEvents(db, taskId)).filter((r) => r.type === "status").at(-1);
+      assert.equal((terminal?.payload as { status: string }).status, "cancelled");
     },
   );
 
