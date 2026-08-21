@@ -7,6 +7,7 @@ import { isTerminal, transcriptItems } from "../lib/eventReducer";
 import { isCancelling } from "../lib/streamPolicy";
 import { useTranscriptStream, type ConnectionState } from "../lib/useTranscriptStream";
 import type { RunView, TaskView } from "../lib/types";
+import { ActivityStrip } from "./ActivityStrip";
 import { StickToBottom } from "./StickToBottom";
 import { ArchiveActions } from "./archive/ArchiveActions";
 import { Transcript } from "./transcript/Transcript";
@@ -92,6 +93,18 @@ export function TaskDetail({
   const usage = sumUsage(runs);
   /** True from the click until the run reaches a terminal status. */
   const cancelling = isCancelling(cancelRequested, runId, !running);
+
+  /**
+   * When the run in flight began, for the elapsed clock above the composer.
+   * Taken from the stream rather than the server-rendered `runs`, because a
+   * follow-up turn is a new run that those props do not know about until a
+   * refresh -- and a clock that starts at the *previous* run is worse than none.
+   */
+  const runStartedAt =
+    state.events.find((e) => e.runId === state.runId)?.createdAt ??
+    latestRun?.startedAt ??
+    latestRun?.createdAt ??
+    null;
 
   // Released once the run has actually stopped, or once a follow-up turn has
   // started a different run. `isCancelling` already refuses to show the state
@@ -399,7 +412,25 @@ export function TaskDetail({
       {/* ---------------------------------------------------------------- */}
       <footer className="shrink-0 border-t border-border bg-bg px-5 py-3 lg:px-8">
         <div className="mx-auto max-w-4xl">
-          <div className="rounded-xl border border-border-strong bg-surface p-2 focus-within:border-fg-faint">
+          {running ? (
+            <ActivityStrip
+              phase={state.phase}
+              items={items}
+              costUsd={usage.costUsd}
+              startedAt={runStartedAt}
+              cancelling={cancelling}
+              canCancel={runId !== null}
+              onCancel={requestCancel}
+            />
+          ) : null}
+          <div
+            className={cn(
+              "border border-border-strong bg-surface p-2 focus-within:border-fg-faint",
+              // The strip sits flush on top of the composer while a run is live,
+              // so the two read as one control rather than a floating notice.
+              running ? "rounded-b-xl" : "rounded-xl",
+            )}
+          >
             <Textarea
               rows={2}
               value={followUp}
