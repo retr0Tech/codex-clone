@@ -1,0 +1,6 @@
+# The agent image copies exactly one file: the bundled runtime. Everything
+# else is excluded so the build context stays a few hundred kilobytes and no
+# stray .env can ever be reachable from a Dockerfile COPY.
+*
+
+!apps/agent-runtime/dist/agent.mjs

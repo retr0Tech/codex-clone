@@ -1,28 +1,22 @@
 {
-  "name": "worker",
+  "name": "agent-runtime",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json --noEmit && pnpm run bundle",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --minify --outfile=dist/agent.mjs",
     "typecheck": "tsc -p tsconfig.test.json",
     "lint": "eslint src",
     "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
-  "dependencies": {
-    "@codex-clone/core": "workspace:*",
-    "@codex-clone/db": "workspace:*",
-    "@codex-clone/sandbox-docker": "workspace:*",
-    "dockerode": "^4.0.4",
-    "ws": "^8.18.0"
-  },
   "devDependencies": {
+    "@codex-clone/core": "workspace:*",
+    "@codex-clone/sandbox-docker": "workspace:*",
     "@eslint/js": "^9.18.0",
-    "@types/dockerode": "^3.3.34",
     "@types/node": "^22.10.5",
-    "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.2",
     "eslint": "^9.18.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
