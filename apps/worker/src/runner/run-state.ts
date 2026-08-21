@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import type { RunPhase, RunStatus } from "@codex-clone/core";
+import type { BudgetBreach, RunPhase, RunStatus } from "@codex-clone/core";
 import { repos, runs, tasks, type Database } from "@codex-clone/db";
 import type { RunMeterSnapshot } from "../gateway/metering.js";
 
@@ -91,6 +91,12 @@ export async function recordUsage(db: Database, runId: string, snapshot: RunMete
 export interface FinalizeRun {
   status: RunStatus;
   stopReason: string | null;
+  /**
+   * The bound that stopped this run, or null. Written explicitly rather than
+   * inferred later: a cancelled run and a run that hit its cost ceiling can end
+   * up with similar-looking numbers, and only the run loop knows which happened.
+   */
+  budgetBreach?: BudgetBreach | null;
   usage?: RunMeterSnapshot | null;
 }
 
@@ -109,6 +115,7 @@ export async function finalizeRun(db: Database, runId: string, taskId: string, r
         status: result.status,
         phase: "done",
         stopReason: result.stopReason,
+        budgetBreach: result.budgetBreach ?? null,
         endedAt: new Date(),
         ...(result.usage
           ? {

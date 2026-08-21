@@ -1,3 +1,4 @@
+import type { RunBudget } from "@codex-clone/core";
 import type { Database } from "@codex-clone/db";
 import {
   CredentialStore as EncryptedStore,
@@ -56,5 +57,14 @@ export class EncryptedCredentialStore implements CredentialStore {
   /** Non-secret preferences that live in the same singleton row. */
   async defaultModel(): Promise<string> {
     return (await this.#store.view()).defaultModel;
+  }
+
+  /**
+   * The run bounds, read per run for the same reason the key is read per call:
+   * a ceiling raised in Settings must take effect on the next run rather than
+   * on the next restart of this process.
+   */
+  runBudget(): Promise<RunBudget> {
+    return this.#store.budget();
   }
 }

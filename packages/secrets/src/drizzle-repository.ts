@@ -25,6 +25,9 @@ export function drizzleSettingsRepository(db: Database): SettingsRepository {
         openaiKeyHint: row.openaiKeyHint,
         defaultModel: row.defaultModel,
         maxConcurrentSandboxes: row.maxConcurrentSandboxes,
+        budgetMaxTurns: row.budgetMaxTurns,
+        budgetMaxCostUsd: row.budgetMaxCostUsd,
+        budgetWallClockMs: row.budgetWallClockMs,
       };
     },
 

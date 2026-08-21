@@ -2,15 +2,17 @@ import { join } from "node:path";
 import type Docker from "dockerode";
 import type {
   AnyEventRow,
+  BudgetBreach,
   DurableEventType,
   EventPayloadMap,
   ResourceLimits,
+  RunBudget,
   RunStatus,
   SandboxHandle,
   SandboxProvider,
   SnapshotStore,
 } from "@codex-clone/core";
-import { redact } from "@codex-clone/core";
+import { BREACH_LABEL, DEFAULT_BUDGET, redact } from "@codex-clone/core";
 import {
   appendEvent,
   highestSeqBefore,
@@ -21,7 +23,8 @@ import {
 import { recordMirror, type MirrorManager } from "@codex-clone/github";
 import type { DockerSandboxSpec } from "@codex-clone/sandbox-docker";
 import { workspaceVolumeName } from "@codex-clone/sandbox-docker";
-import type { MeterRegistry } from "../gateway/metering.js";
+import type { MeterRegistry, RunMeterSnapshot } from "../gateway/metering.js";
+import { RunDeadline, wallClockReason } from "./deadline.js";
 import {
   finalizeRun,
   loadTaskContext,
@@ -74,6 +77,13 @@ export interface SupervisorDeps {
   /** Model for this run, from the Settings row. */
   model: () => Promise<string>;
   /**
+   * The run bounds (PLAN.md §3.4), resolved once per run so an edit in Settings
+   * lands on the next run rather than on the next worker restart. The gateway
+   * meter enforces turns and cost; the wall clock is enforced from here as
+   * well, because the meter can only fire when the agent asks for a model call.
+   */
+  budget?: () => Promise<RunBudget>;
+  /**
    * Where a repository is cloned from. Injectable so the integration test can
    * point at a bare repo on local disk instead of github.com -- the mirror
    * layer is the same either way, which is the point of having one.
@@ -118,6 +128,11 @@ export interface SuperviseOptions {
 export interface RunOutcome {
   status: RunStatus;
   stopReason: string | null;
+  /**
+   * The bound this run actually hit, or null. Null for every run that was not
+   * stopped by a budget -- including, emphatically, a cancelled one.
+   */
+  budgetBreach: BudgetBreach | null;
 }
 
 /**
@@ -126,10 +141,17 @@ export interface RunOutcome {
  */
 export class RunController {
   #cancelled: string | null = null;
+  #timedOut: string | null = null;
   #handle: SandboxHandle | null = null;
 
   get cancelReason(): string | null {
     return this.#cancelled;
+  }
+
+  /** Set by the wall-clock deadline. Kept apart from `cancelReason` because a
+   *  run that ran out of time and a run a person stopped are different facts. */
+  get timeoutReason(): string | null {
+    return this.#timedOut;
   }
 
   get handle(): SandboxHandle | null {
@@ -142,6 +164,10 @@ export class RunController {
 
   markCancelled(reason: string): void {
     this.#cancelled ??= reason;
+  }
+
+  markTimedOut(reason: string): void {
+    this.#timedOut ??= reason;
   }
 }
 
@@ -173,6 +199,35 @@ export async function superviseRun(
   let agentStatus: { status: RunStatus; reason: string | null } | null = null;
   let failure: string | null = null;
   const diffs = new DiffTrigger();
+
+  const budget = await (deps.budget?.() ?? Promise.resolve(DEFAULT_BUDGET)).catch((error: unknown) => {
+    // A budget nobody can read is a Settings problem, not a reason to refuse to
+    // run; the built-in default still bounds the run, which is the point.
+    log(`[run ${runId.slice(0, 8)}] could not read the run budget, using the default: ${redact(String(error))}`);
+    return DEFAULT_BUDGET;
+  });
+
+  /**
+   * The hard wall clock. The gateway meter checks the same bound, but only when
+   * a model call arrives -- an agent wedged inside a tool call makes none, and
+   * before this existed such a run held a concurrency slot indefinitely.
+   *
+   * Closing the meter first mirrors the cancel path exactly: no further model
+   * call is admitted even mid-turn, and only then is the container SIGTERMed
+   * with its grace period, so partial work still lands in the volume.
+   */
+  const deadline = RunDeadline.arm(budget.wallClockMs, () => {
+    const reason = wallClockReason(budget.wallClockMs);
+    controller.markTimedOut(reason);
+    log(`[run ${runId.slice(0, 8)}] ${reason}`);
+    deps.meters.peek(runId)?.close("wall_clock", reason);
+    const live = controller.handle;
+    if (live) {
+      void deps.sandboxes
+        .stop(live, { graceMs: deps.config.stopGraceMs, reason })
+        .catch((err: unknown) => log(`[run ${runId.slice(0, 8)}] timeout stop failed: ${redact(String(err))}`));
+    }
+  });
 
   try {
     const task = await loadTaskContext(db, taskId);
@@ -209,9 +264,19 @@ export async function superviseRun(
       log(`[run ${runId.slice(0, 8)}] re-attaching to sandbox ${handle.id.slice(0, 8)}`);
     } else {
       await emit("phase", { phase: "setup" });
-      handle = await start(deps, task, { runId, prompt: claimed.prompt }, emit, log);
+      handle = await start(deps, task, { runId, prompt: claimed.prompt, budget }, emit, log);
       controller.attachHandle(handle);
       await setRunSandbox(db, runId, handle.id);
+    }
+
+    // The deadline can fire while the container is being created, exactly as a
+    // cancel can. Both take the same path: stop it as soon as there is
+    // something to stop.
+    if (controller.timeoutReason && !controller.cancelReason) {
+      await deps.sandboxes.stop(handle, {
+        graceMs: deps.config.stopGraceMs,
+        reason: controller.timeoutReason,
+      });
     }
 
     // Cancel may have arrived while the container was being created. Take the
@@ -254,6 +319,10 @@ export async function superviseRun(
     failure = redact(error instanceof Error ? error.message : String(error));
     log(`[run ${runId.slice(0, 8)}] failed: ${failure}`);
     await emit("error", { code: "run_failed", message: failure, retryable: false }).catch(() => undefined);
+  } finally {
+    // Every exit from the block above, including every throw. A live timer here
+    // would hold a reference to a run that is already over.
+    deadline.cancel();
   }
 
   return finalize(deps, { runId, taskId }, { handle, agentStatus, failure, controller, emit });
@@ -267,7 +336,7 @@ function defaultCloneUrl(repo: { fullName: string }): string {
 async function start(
   deps: SupervisorDeps,
   task: TaskContext,
-  run: { runId: string; prompt: string },
+  run: { runId: string; prompt: string; budget: RunBudget },
   emit: Emitter,
   log: (message: string) => void,
 ): Promise<SandboxHandle> {
@@ -344,7 +413,9 @@ async function start(
     gatewaySocketPath: deps.config.gatewaySocketPath,
     ...(deps.config.cacheVolumeName ? { cacheVolumeName: deps.config.cacheVolumeName } : {}),
     ...(setupScript ? { setupScript } : {}),
-    limits: deps.config.limits,
+    // One wall clock, not two: the container's limit and the host's deadline
+    // are the same bound, so they are fed from the same number.
+    limits: { ...deps.config.limits, wallClockMs: run.budget.wallClockMs },
     // Infrastructure only. `assertNoSecretsInEnv` refuses anything that looks
     // like a credential, and there is nothing here for it to refuse.
     env: {},
@@ -358,7 +429,7 @@ async function start(
   return deps.sandboxes.create(spec);
 }
 
-interface FinalizeContext {
+export interface FinalizeContext {
   handle: SandboxHandle | null;
   agentStatus: { status: RunStatus; reason: string | null } | null;
   failure: string | null;
@@ -379,7 +450,7 @@ async function finalize(
   ctx: FinalizeContext,
 ): Promise<RunOutcome> {
   const usage = deps.meters.release(ids.runId);
-  const outcome = decideOutcome(ctx);
+  const outcome = decideOutcome(ctx, usage);
 
   // The agent's own terminal status is already in the log; anything else is the
   // host's word and has to be written as such, so the transcript never ends
@@ -405,6 +476,7 @@ async function finalize(
   await finalizeRun(deps.db, ids.runId, ids.taskId, {
     status: outcome.status,
     stopReason: outcome.stopReason,
+    budgetBreach: outcome.budgetBreach,
     usage,
   });
   // Nothing further can be emitted for this run, so the delta route is dead.
@@ -445,15 +517,63 @@ export async function abandonRun(
   await finalizeRun(deps.db, ids.runId, ids.taskId, { status: "failed", stopReason: reason });
 }
 
-function decideOutcome(ctx: FinalizeContext): RunOutcome {
-  // Cancel wins over whatever the agent managed to say on its way out: the user
-  // asked for this, and the reason they get should be theirs.
+/**
+ * How the run is recorded, in one place.
+ *
+ * The order is the priority order, and each step is a claim about who has the
+ * better information:
+ *
+ *   1. cancel     the user asked for this; their reason beats everything
+ *   2. timeout    the host stopped it; the agent's parting words cannot say why
+ *   3. failure    the host saw the run throw
+ *   4. the agent's own terminal status, refined by what the meter measured
+ *
+ * Steps 1 and 2 sit above 4 deliberately. Both stop the container, so whatever
+ * the agent manages to emit on its way out -- typically `budget_exhausted`,
+ * because the gateway refused its next call -- is a symptom of the stop rather
+ * than an account of it. Reporting a cancelled run as a budget breach was a
+ * real bug; `budgetBreach` is null on every path except a genuine one.
+ */
+export function decideOutcome(ctx: FinalizeContext, usage: RunMeterSnapshot | null): RunOutcome {
   if (ctx.controller.cancelReason) {
-    return { status: "cancelled", stopReason: ctx.controller.cancelReason };
+    return { status: "cancelled", stopReason: ctx.controller.cancelReason, budgetBreach: null };
   }
-  if (ctx.failure) return { status: "failed", stopReason: ctx.failure };
-  if (ctx.agentStatus) return { status: ctx.agentStatus.status, stopReason: ctx.agentStatus.reason };
+  if (ctx.controller.timeoutReason) {
+    return { status: "timed_out", stopReason: ctx.controller.timeoutReason, budgetBreach: "wall_clock" };
+  }
+  if (ctx.failure) return { status: "failed", stopReason: ctx.failure, budgetBreach: null };
+
+  if (ctx.agentStatus) {
+    const reported = ctx.agentStatus.status;
+    if (reported !== "budget_exhausted" && reported !== "timed_out") {
+      return { status: reported, stopReason: ctx.agentStatus.reason, budgetBreach: null };
+    }
+    // The agent knows it was refused; the METER knows which bound did it. A
+    // wall-clock breach reads as `timed_out`, so `budget_exhausted` always
+    // means turns or cost -- two states, not one bucket.
+    const breach = usage?.breach ?? (reported === "timed_out" ? "wall_clock" : null);
+    const status: RunStatus = breach === "wall_clock" ? "timed_out" : "budget_exhausted";
+    return { status, stopReason: budgetStopReason(breach, usage, ctx.agentStatus.reason), budgetBreach: breach };
+  }
+
   // The stream ended without a terminal status: the container died without
   // saying anything. Never leave the run looking like it is still working.
-  return { status: "failed", stopReason: "the sandbox exited without reporting a status" };
+  return {
+    status: "failed",
+    stopReason: "the sandbox exited without reporting a status",
+    budgetBreach: null,
+  };
+}
+
+/** Names the bound and what it cost to reach it, rather than only "exhausted". */
+function budgetStopReason(
+  breach: BudgetBreach | null,
+  usage: RunMeterSnapshot | null,
+  fallback: string | null,
+): string | null {
+  if (!breach) return fallback;
+  const spent = usage
+    ? ` after ${usage.turns} turn${usage.turns === 1 ? "" : "s"} and $${usage.costUsd.toFixed(4)}`
+    : "";
+  return `${BREACH_LABEL[breach]} was reached${spent}`;
 }

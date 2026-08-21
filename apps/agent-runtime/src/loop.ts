@@ -94,20 +94,16 @@ export async function runAgentLoop(deps: AgentLoopDeps): Promise<AgentLoopResult
     }
 
     if (collected.refusal) {
-      // Budget breach or upstream failure. The gateway has already granted the
-      // wind-down turn; there is nothing further to negotiate, so we stop
-      // rather than retry. Never hang, never spin.
+      // Budget breach, cancellation, or upstream failure. The gateway has
+      // already granted the wind-down turn; there is nothing further to
+      // negotiate, so we stop rather than retry. Never hang, never spin.
       const { reason, message } = collected.refusal;
       writer.emit("error", {
         code: `gateway_refused:${reason}`,
         message,
         retryable: reason === "upstream_error",
       });
-      return {
-        status: reason === "upstream_error" ? "failed" : "budget_exhausted",
-        reason: message,
-        turns: turn + 1,
-      };
+      return { status: statusForRefusal(reason), reason: message, turns: turn + 1 };
     }
 
     if (collected.toolCalls.length === 0) {
@@ -126,6 +122,28 @@ export async function runAgentLoop(deps: AgentLoopDeps): Promise<AgentLoopResult
   const message = `reached the runtime turn limit of ${job.maxTurns}`;
   writer.emit("error", { code: "turn_limit", message, retryable: false });
   return { status: "budget_exhausted", reason: message, turns: job.maxTurns };
+}
+
+/**
+ * What a refusal means for the run's terminal status.
+ *
+ * The host has the last word (it knows whether a human pressed Cancel and
+ * whether the wall clock ran out), but this process still writes a status into
+ * the transcript, and it must not call a cancellation a budget breach. The
+ * `wall_clock` bound reads as `timed_out` rather than `budget_exhausted` for
+ * the same reason: they are different signals to whoever is reading.
+ */
+function statusForRefusal(reason: string): RunStatus {
+  switch (reason) {
+    case "upstream_error":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    case "wall_clock":
+      return "timed_out";
+    default:
+      return "budget_exhausted";
+  }
 }
 
 interface CollectedTurn {

@@ -26,7 +26,19 @@ export interface RunMeterSnapshot {
   costUsd: number;
   elapsedMs: number;
   state: MeterState;
+  /**
+   * The bound that was actually hit, or null. Null for a meter that was closed
+   * deliberately (cancel, host wind-down) rather than by a budget -- see
+   * `cancel()` below. Everything downstream that renders a breach reads this,
+   * so "cancelled" and "budget exhausted" cannot be conflated by accident.
+   */
   breach: BudgetBreach | null;
+  /** True when a human stopped this run. Mutually exclusive with a breach. */
+  cancelled: boolean;
+  /** Why the meter was closed, in the words of whoever closed it. */
+  closedReason: string | null;
+  /** The budget this run was measured against, for honest headroom reporting. */
+  budget: RunBudget;
 }
 
 export class RunMeter {
@@ -37,6 +49,7 @@ export class RunMeter {
   #costUsd = 0;
   #state: MeterState = "open";
   #breach: BudgetBreach | null = null;
+  #cancelled = false;
   readonly startedAt: number;
 
   constructor(
@@ -66,6 +79,9 @@ export class RunMeter {
       elapsedMs: this.now() - this.startedAt,
       state: this.#state,
       breach: this.#breach,
+      cancelled: this.#cancelled,
+      closedReason: this.#closedReason,
+      budget: this.budget,
     };
   }
 
@@ -87,15 +103,18 @@ export class RunMeter {
    * Note the turn is counted before the check, so `maxTurns: 40` means forty
    * model calls, not forty-one.
    */
-  admit(): { action: "forward" } | { action: "wind_down"; breach: BudgetBreach } | { action: "refuse"; breach: BudgetBreach } {
+  admit():
+    | { action: "forward" }
+    | { action: "wind_down"; breach: BudgetBreach }
+    | { action: "refuse"; reason: BudgetBreach | "cancelled" } {
     if (this.#state === "closed") {
-      return { action: "refuse", breach: this.#breach ?? "max_turns" };
+      return { action: "refuse", reason: this.#refusalReason() };
     }
     if (this.#state === "winding_down") {
       // The wind-down turn was already granted and is now being asked for a
       // second time. This is the hard stop.
       this.#state = "closed";
-      return { action: "refuse", breach: this.#breach ?? "max_turns" };
+      return { action: "refuse", reason: this.#refusalReason() };
     }
 
     const breach = checkBudget(this.budget, this.usage());
@@ -111,14 +130,8 @@ export class RunMeter {
   }
 
   /**
-   * Why this meter was closed, in the words of whoever closed it.
-   *
-   * A cancel and a wall-clock breach take the same path -- no more model calls,
-   * immediately -- but they are not the same event, and the refusal the agent
-   * receives ends up in the transcript. Without this, cancelling from the UI
-   * told the user their budget was exhausted, which was simply untrue.
-   * `BudgetBreach` is a frozen union in core, so the distinction is carried as
-   * a message rather than as a fourth member of it.
+   * Why this meter was closed, in the words of whoever closed it. Surfaced to
+   * the agent as the refusal message, so it ends up in the transcript verbatim.
    */
   #closedReason: string | null = null;
 
@@ -126,8 +139,36 @@ export class RunMeter {
     return this.#closedReason;
   }
 
-  /** Cancel from the UI takes the same path as a breach: no more model calls. */
-  close(breach: BudgetBreach = "wall_clock", reason?: string): void {
+  get cancelled(): boolean {
+    return this.#cancelled;
+  }
+
+  #refusalReason(): BudgetBreach | "cancelled" {
+    if (this.#cancelled) return "cancelled";
+    // A meter can only be closed by a breach or by `cancel()`, so this fallback
+    // is unreachable; `max_turns` is the least alarming thing to say if it ever
+    // is reached.
+    return this.#breach ?? "max_turns";
+  }
+
+  /**
+   * A human stopped this run. NOT a budget breach.
+   *
+   * A cancel and a wall-clock breach take the same path -- no more model calls,
+   * immediately -- but they are not the same event, and the refusal the agent
+   * receives ends up in the transcript. Before this existed, cancelling from
+   * the UI closed the meter with a `wall_clock` breach and the user was told
+   * their budget was exhausted, which was simply untrue. `breach` stays null
+   * here so that nothing downstream can render this run as a budget breach.
+   */
+  cancel(reason: string): void {
+    this.#state = "closed";
+    this.#cancelled = true;
+    this.#closedReason ??= reason;
+  }
+
+  /** A bound was hit: no further model call is admitted for this run. */
+  close(breach: BudgetBreach, reason?: string): void {
     this.#state = "closed";
     this.#breach ??= breach;
     this.#closedReason ??= reason ?? null;
@@ -149,10 +190,19 @@ export class MeterRegistry {
     private readonly now: () => number = Date.now,
   ) {}
 
-  for(runId: string): RunMeter {
+  /**
+   * The meter for a run, created on first sight.
+   *
+   * `budget` overrides the registry default for a run that has not been seen
+   * yet, which is how a budget edited in Settings takes effect on the next run
+   * rather than on the next worker restart. It is deliberately ignored for a
+   * run already in flight: a budget must not move under a run that is being
+   * measured against it.
+   */
+  for(runId: string, budget?: RunBudget): RunMeter {
     let meter = this.#meters.get(runId);
     if (!meter) {
-      meter = new RunMeter(runId, this.budget, this.now);
+      meter = new RunMeter(runId, budget ?? this.budget, this.now);
       this.#meters.set(runId, meter);
     }
     return meter;

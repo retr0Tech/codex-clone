@@ -18,7 +18,8 @@
  * no Postgres anywhere near it.
  */
 
-import { registerSecret } from "@codex-clone/core";
+import type { RunBudget } from "@codex-clone/core";
+import { DEFAULT_BUDGET, registerSecret } from "@codex-clone/core";
 import { decryptSecret, encryptSecret, hintOf, maskFromHint, type EncryptionKey } from "./crypto.js";
 
 /** The subset of the `settings` row this package owns. */
@@ -29,6 +30,10 @@ export interface StoredSettings {
   openaiKeyHint: string | null;
   defaultModel: string;
   maxConcurrentSandboxes: number;
+  /** Run bounds (PLAN.md §3.4). Flat columns; `budget()` assembles them. */
+  budgetMaxTurns: number;
+  budgetMaxCostUsd: number;
+  budgetWallClockMs: number;
 }
 
 export type SettingsPatch = Partial<StoredSettings>;
@@ -60,6 +65,8 @@ export interface SettingsView {
   openaiKey: CredentialSummary;
   defaultModel: string;
   maxConcurrentSandboxes: number;
+  /** The default run bounds every new run is measured against. */
+  budget: RunBudget;
 }
 
 export const DEFAULT_SETTINGS: StoredSettings = {
@@ -69,6 +76,12 @@ export const DEFAULT_SETTINGS: StoredSettings = {
   openaiKeyHint: null,
   defaultModel: "gpt-5",
   maxConcurrentSandboxes: 3,
+  // Sourced from core so an unsaved settings row and a freshly saved default
+  // bound a run identically. Two copies of these numbers is how the ceiling the
+  // UI advertises comes to differ from the one the gateway enforces.
+  budgetMaxTurns: DEFAULT_BUDGET.maxTurns,
+  budgetMaxCostUsd: DEFAULT_BUDGET.maxCostUsd,
+  budgetWallClockMs: DEFAULT_BUDGET.wallClockMs,
 };
 
 const COLUMNS: Record<CredentialName, { enc: keyof StoredSettings; hint: keyof StoredSettings }> = {
@@ -101,7 +114,19 @@ export class CredentialStore {
       openaiKey: summarise(isSet(row.openaiKeyEnc), row.openaiKeyHint),
       defaultModel: row.defaultModel,
       maxConcurrentSandboxes: row.maxConcurrentSandboxes,
+      budget: toBudget(row),
     };
+  }
+
+  /**
+   * The run bounds, without the rest of the view.
+   *
+   * The gateway calls this once per run rather than caching it, for the same
+   * reason it re-reads the API key on every call: a ceiling raised in Settings
+   * should take effect on the next run, not on the next worker restart.
+   */
+  async budget(): Promise<RunBudget> {
+    return toBudget(await this.#settings());
   }
 
   /** True if the credential is set, without decrypting it. */
@@ -158,15 +183,31 @@ export class CredentialStore {
   async setPreferences(prefs: {
     defaultModel?: string;
     maxConcurrentSandboxes?: number;
+    budget?: RunBudget;
   }): Promise<void> {
     const patch: SettingsPatch = {};
     if (prefs.defaultModel !== undefined) patch.defaultModel = prefs.defaultModel;
     if (prefs.maxConcurrentSandboxes !== undefined) {
       patch.maxConcurrentSandboxes = prefs.maxConcurrentSandboxes;
     }
+    if (prefs.budget !== undefined) {
+      // Written as one unit: a half-applied budget (new turn ceiling, old cost
+      // ceiling) is a combination the user never chose.
+      patch.budgetMaxTurns = prefs.budget.maxTurns;
+      patch.budgetMaxCostUsd = prefs.budget.maxCostUsd;
+      patch.budgetWallClockMs = prefs.budget.wallClockMs;
+    }
     if (Object.keys(patch).length === 0) return;
     await this.#repo.write(patch);
   }
+}
+
+function toBudget(row: StoredSettings): RunBudget {
+  return {
+    maxTurns: row.budgetMaxTurns,
+    maxCostUsd: row.budgetMaxCostUsd,
+    wallClockMs: row.budgetWallClockMs,
+  };
 }
 
 function isSet(envelope: string | null): boolean {
