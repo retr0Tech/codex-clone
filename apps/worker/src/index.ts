@@ -11,6 +11,7 @@ import { config } from "./config.js";
 import { EncryptedCredentialStore } from "./credentials.js";
 import { OpenAiUpstream } from "./gateway/openai-upstream.js";
 import { GatewayServer } from "./gateway/server.js";
+import { EventHub } from "./hub/server.js";
 import { RunQueue } from "./runner/queue.js";
 import { recordUsage } from "./runner/run-state.js";
 import type { SupervisorDeps } from "./runner/supervisor.js";
@@ -54,6 +55,21 @@ async function main(): Promise<void> {
   // APP_ENCRYPTION_KEY is the only secret in this process's environment.
   const credentials = EncryptedCredentialStore.fromDatabase(db);
 
+  // Milestone 6: the live transcript hub. Constructed before the gateway so
+  // the gateway's delta callback can hand tokens straight to it.
+  //
+  // `cancel` is filled in once the queue exists: the socket is bidirectional
+  // precisely so cancel can ride it, but the thing that does the stopping is
+  // the queue, which owns the run's controller and its container handle.
+  let cancelRun: (runId: string) => Promise<boolean> = () => Promise.resolve(false);
+  const hub = new EventHub({
+    db,
+    port: config.wsPort,
+    host: config.bindHost,
+    onCancel: (runId) => cancelRun(runId),
+    log: (message) => console.log(redact(message)),
+  });
+
   // Milestone 4: the model gateway. It holds the OpenAI key so the sandbox
   // never does, and it is the single place run budgets are enforced.
   const gateway = new GatewayServer({
@@ -62,8 +78,9 @@ async function main(): Promise<void> {
     upstream: new OpenAiUpstream(),
     budget: config.budget,
     onError: (message) => console.error(`[gateway] ${redact(message)}`),
-    // Token deltas are the one thing broadcast but never persisted; the WS hub
-    // subscribes to them in milestone 6.
+    // The one thing broadcast but never persisted. The durable `message` the
+    // agent emits at end of turn supersedes it (PLAN.md §3.6).
+    onDelta: (runId, messageId, text) => hub.publishDelta(runId, messageId, text),
     onUsage: (runId, _usage, snapshot) => {
       void recordUsage(db, runId, snapshot).catch((err: unknown) => {
         console.warn(`[worker] could not record usage for ${runId.slice(0, 8)}: ${redact(String(err))}`);
@@ -72,6 +89,9 @@ async function main(): Promise<void> {
   });
   await gateway.listen();
   console.log(`[worker] model gateway listening on ${config.gatewaySocketPath}`);
+
+  await hub.listen();
+  console.log(`[worker] transcript hub listening on ws://${config.bindHost}:${hub.port}`);
 
   const deps: SupervisorDeps = {
     db,
@@ -89,6 +109,9 @@ async function main(): Promise<void> {
       dataDir: config.dataDir,
       cacheVolumeName: config.cacheVolumeName,
     },
+    publish: (row) => hub.publish(row),
+    bindRun: (runId, taskId) => hub.bindRun(runId, taskId),
+    releaseRun: (runId) => hub.releaseRun(runId),
     log: (message) => console.log(redact(message)),
   };
 
@@ -97,6 +120,7 @@ async function main(): Promise<void> {
     workerId: `${hostname()}-${process.pid}-${randomUUID().slice(0, 8)}`,
     maxConcurrent: config.maxConcurrentSandboxes,
   });
+  cancelRun = (runId) => queue.cancel(runId);
 
   // Reconcile against Docker rather than trusting in-memory state: a worker
   // restart must not orphan running containers (PLAN.md §7, risk 5).
@@ -104,7 +128,6 @@ async function main(): Promise<void> {
   queue.start();
   console.log(`[worker] run queue consuming, up to ${config.maxConcurrentSandboxes} concurrent sandbox(es)`);
 
-  // Milestone 6: WebSocket hub on config.wsPort, backfill-then-live by seq.
   // Milestone 8: idle reaper -- export cold snapshot, drop hot volume.
   // Milestone 9: scheduler tick every config.schedulerTickMs.
 
@@ -114,6 +137,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log(`[worker] ${signal} received, shutting down`);
     await queue.stop();
+    await hub.close();
     await gateway.close();
     await close();
     process.exit(0);

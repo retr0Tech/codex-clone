@@ -1,23 +1,31 @@
 import { and, asc, eq, gt, max, ne } from "drizzle-orm";
 import type { AnyEventRow, DurableEventType, EventPayloadMap } from "@codex-clone/core";
-import { events, type Database } from "@codex-clone/db";
+import { events } from "./schema.js";
+import type { Database } from "./index.js";
 
 /**
  * The durable transcript.
  *
- * Two invariants live here, and both are load-bearing:
+ * This lives in the DB package rather than in the worker for one reason: TWO
+ * processes read it. The worker's WebSocket hub backfills from it before going
+ * live, and the web app's `GET /api/tasks/:id/events` serves it as history.
+ * PLAN.md §3.6 makes one client reducer serve both, and that only holds if a
+ * history row and a live frame are the same shape -- which in turn only holds
+ * if there is one function that builds them. Two copies of `fromRecord`, one
+ * per app, is precisely how that invariant would quietly rot.
+ *
+ * Two more invariants live here, and both are load-bearing:
  *
  *  1. **Writes are idempotent.** `DockerSandbox.attach()` follows the container
  *     log with no `tail`, so a worker that restarts mid-run replays the stream
  *     from its first byte. Combined with the replay-stable numbering in
- *     `seq.ts`, `onConflictDoNothing` on `events_run_seq_idx` turns that replay
- *     into a no-op instead of a duplicated transcript.
+ *     `apps/worker/src/runner/seq.ts`, `onConflictDoNothing` on
+ *     `events_run_seq_idx` turns that replay into a no-op instead of a
+ *     duplicated transcript.
  *
  *  2. **A row read back is byte-identical in shape to a live frame.**
  *     `EventRow.createdAt` is an ISO string but the column is `timestamptz`, so
- *     the conversion happens on both edges, here, once. PLAN.md §3.6 makes one
- *     reducer serve live and history; that only holds if history rows come back
- *     in exactly the shape the socket sends.
+ *     the conversion happens on both edges, here, once.
  */
 
 export function toRow<T extends DurableEventType>(input: {
@@ -64,8 +72,9 @@ export async function appendEvent(db: Database, row: AnyEventRow): Promise<boole
 /**
  * History for a task, as `AnyEventRow[]` -- the exact type the socket streams.
  *
- * Ordered by seq, which is monotonic across the whole task (see `seq.ts`), so
- * `after` is a single cursor that survives follow-up runs.
+ * Ordered by seq, which the worker keeps monotonic across the whole task, so
+ * `after` is a single cursor that survives follow-up runs -- the same cursor
+ * the WebSocket handshake carries.
  */
 export async function readEvents(db: Database, taskId: string, after = 0): Promise<AnyEventRow[]> {
   const rows = await db

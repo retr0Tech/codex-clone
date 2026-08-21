@@ -7,7 +7,7 @@ import { after, before, describe, it } from "node:test";
 import Docker from "dockerode";
 import { eq } from "drizzle-orm";
 import { DEFAULT_LIMITS } from "@codex-clone/core";
-import { createDb, events, repos, runs, tasks, type Database } from "@codex-clone/db";
+import { appendEvent, createDb, events, readEvents, repos, runs, tasks, type Database } from "@codex-clone/db";
 import { MirrorManager } from "@codex-clone/github";
 import {
   acquireDockerTestLock,
@@ -21,7 +21,6 @@ import { StaticCredentialStore } from "../gateway/credentials.js";
 import { FakeUpstream, upstream } from "../gateway/fake-upstream.js";
 import { GatewayServer } from "../gateway/server.js";
 import { claimNextRun } from "./claim.js";
-import { appendEvent, readEvents } from "./event-log.js";
 import { superviseRun, type SupervisorDeps } from "./supervisor.js";
 import { git } from "./git.js";
 import {

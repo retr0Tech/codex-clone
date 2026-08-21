@@ -10,12 +10,17 @@ import type {
   SandboxProvider,
 } from "@codex-clone/core";
 import { redact } from "@codex-clone/core";
-import type { Database } from "@codex-clone/db";
+import {
+  appendEvent,
+  highestSeqBefore,
+  highestSeqForRun,
+  toRow,
+  type Database,
+} from "@codex-clone/db";
 import type { MirrorManager } from "@codex-clone/github";
 import type { DockerSandboxSpec } from "@codex-clone/sandbox-docker";
 import { workspaceVolumeName } from "@codex-clone/sandbox-docker";
 import type { MeterRegistry } from "../gateway/metering.js";
-import { appendEvent, highestSeqBefore, highestSeqForRun, toRow } from "./event-log.js";
 import {
   finalizeRun,
   loadTaskContext,
@@ -73,8 +78,22 @@ export interface SupervisorDeps {
     dataDir: string;
     cacheVolumeName?: string | undefined;
   };
-  /** The WebSocket hub subscribes here in milestone 6. */
+  /**
+   * The WebSocket hub. Called ONLY for rows that were actually written -- a
+   * replayed row is already in every subscriber's history, so re-broadcasting
+   * it would put the same event on the wire twice.
+   */
   publish?: (row: AnyEventRow) => void;
+  /**
+   * Tells the hub which task a run belongs to, before the first event exists.
+   *
+   * Token deltas carry only a runId, and they arrive per token -- a database
+   * lookup per delta is not a design. Binding here also covers the adoption
+   * path, where the run's opening events are replays and therefore never
+   * published.
+   */
+  bindRun?: (runId: string, taskId: string) => void;
+  releaseRun?: (runId: string) => void;
   log?: (message: string) => void;
 }
 
@@ -126,6 +145,10 @@ export async function superviseRun(
   const { db } = deps;
   const { runId, taskId } = claimed;
   const log = deps.log ?? (() => undefined);
+
+  // Before anything else: deltas for this run must be routable from the first
+  // token, and the first token can precede the first durable event.
+  deps.bindRun?.(runId, taskId);
 
   // Base the run above every seq this task has already used, EXCLUDING this
   // run's own rows -- so a restart mid-run recomputes the identical base and
@@ -306,6 +329,8 @@ async function finalize(
     stopReason: outcome.stopReason,
     usage,
   });
+  // Nothing further can be emitted for this run, so the delta route is dead.
+  deps.releaseRun?.(ids.runId);
 
   return outcome;
 }
