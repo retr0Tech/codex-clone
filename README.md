@@ -17,12 +17,30 @@ rewriting the orchestrator.
 
 ## Requirements
 
+Everything needed to run this, in one place. There is nothing to configure that
+is not listed here or in the quick start below.
+
+**Tooling**
+
 | | |
 |---|---|
 | macOS | the only supported host |
 | Node 22+ | `nvm install 22` |
 | pnpm 9 | `corepack enable` |
-| Docker Desktop | must be running **under the account you develop from** |
+| Docker Desktop | must be **running**, under the account you develop from |
+
+**Credentials** — you supply both; neither ships with the repository, and the
+app cannot list repositories or run an agent without them. You enter them in the
+app at [step 3](#quick-start), not in a config file.
+
+| | |
+|---|---|
+| GitHub personal access token | `repo` scope |
+| OpenAI API key | any key with credit |
+
+**Configuration** — one file, `.env.local`, created in [step 1](#quick-start).
+It holds a single generated encryption key; every other value has a working
+default.
 
 ## Quick start
 
