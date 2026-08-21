@@ -26,6 +26,11 @@ rewriting the orchestrator.
 
 ## Quick start
 
+Make sure **Docker Desktop is running** first — Postgres and every agent
+workspace are containers.
+
+**1. Install and configure**
+
 ```bash
 corepack enable
 pnpm install
@@ -33,24 +38,49 @@ pnpm install
 cp .env.example .env.local
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 # paste the output into APP_ENCRYPTION_KEY in .env.local
+```
 
+`APP_ENCRYPTION_KEY` is the only value you must fill in; everything else in
+`.env.example` has a working default. Both the web app and the worker read that
+single root `.env.local`.
+
+**2. Start the database and the app**
+
+```bash
 pnpm db:up          # Postgres in Docker, bound to 127.0.0.1
 pnpm db:migrate     # create the schema
+pnpm agent:build    # build the agent image -> codex-clone/agent:dev
 pnpm dev            # web on :3000, worker on :8787
 ```
 
-Open <http://localhost:3000>. `APP_ENCRYPTION_KEY` is the only value you must
-fill in; everything else in `.env.example` has a working default. Both the web
-app and the worker read that single root `.env.local`.
+**3. Add your credentials — the app does nothing without this**
 
-Build the agent container image before creating a task — every run needs it:
+Open <http://localhost:3000/settings> and enter both:
 
-```bash
-pnpm agent:build    # -> codex-clone/agent:dev
-```
+| Credential | Needed for | Scope |
+|---|---|---|
+| **GitHub personal access token** | listing your repositories, cloning them, pushing branches, opening pull requests | `repo` |
+| **OpenAI API key** | every agent run | — |
 
-Then open Settings, paste a GitHub PAT and an OpenAI API key, and you are ready
-to create a task.
+Use **Test connection** on each; it calls the real provider, so a green result
+means the credential genuinely works.
+
+They are **not** environment variables. They are encrypted with AES-256-GCM
+before they reach Postgres, shown afterwards only as a masked hint, and never
+sent back to the browser. Nothing sensitive is written to the repository or to
+your shell history.
+
+Without them the app still loads, but the repository picker stays empty and any
+task you create fails at its first model call with
+`no OpenAI API key is configured; add one in Settings`. That is the intended
+behaviour, not a crash — but it is the first thing to check if a run fails
+immediately.
+
+> Keep `.env.local` once you have entered credentials. `APP_ENCRYPTION_KEY` is
+> what they are encrypted against, so regenerating it makes the stored values
+> undecryptable and you will have to enter them again.
+
+You are now ready to create a task.
 
 ### Verify your setup
 
@@ -417,8 +447,24 @@ Things that are deliberately absent rather than overlooked:
 
 ## Troubleshooting
 
+**`no OpenAI API key is configured; add one in Settings`** — the run reached the
+model gateway without a key. Add one at `/settings`; it takes effect on the next
+run, with no restart, because the gateway reads it per call rather than caching
+it.
+
+**The repository picker is empty, or `/api/repos` returns 412** — no GitHub
+token is stored. Add a PAT with `repo` scope at `/settings`.
+
+**A run fails immediately after "workspace ready"** — almost always one of the
+two credentials above. Open the task's transcript: the terminal `status` event
+carries the reason verbatim.
+
 **`Missing required env var: APP_ENCRYPTION_KEY`** — `.env.local` is missing or
 the key is blank. It must live at the repository root, not in `apps/`.
+
+**Credentials you already saved stopped working** — `APP_ENCRYPTION_KEY`
+changed, so the stored ciphertext can no longer be decrypted. Re-enter both
+credentials at `/settings`.
 
 **`connect ENOENT .../docker.sock`** — Docker Desktop is not running, or it was
 installed under a different macOS account. Docker creates a *per-user* socket;
