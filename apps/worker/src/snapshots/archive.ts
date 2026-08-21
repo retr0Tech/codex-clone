@@ -72,6 +72,11 @@ export async function snapshotWorkspace(options: SnapshotIoOptions): Promise<Sna
   const scratch = await mkdtemp(join(options.scratchRoot, `snap-${options.taskId}-`));
 
   try {
+    // The excludes are applied to the EXTRACTED tree (see excludes.ts), which
+    // means node_modules transits host disk on its way to being deleted. The
+    // cost is one temp copy of the workspace per reap, under CODEX_DATA_DIR and
+    // removed in the `finally` below. Worth it for exclusion semantics that do
+    // not depend on which tar the host happens to ship.
     log(`extracting ${options.volumeName} for the cold snapshot\n`);
     await downloadWorkspace(options.docker, options.volumeName, scratch, {
       image: options.image,
